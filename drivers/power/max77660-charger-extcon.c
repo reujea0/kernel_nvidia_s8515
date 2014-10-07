@@ -273,24 +273,40 @@ static int max77660_charger_init(struct max77660_chg_extcon *chip, int enable)
 			return ret;
 
 		/* Fast charge to 5 hours, fast charge current to 1.1A */
+#if (CONFIG_MACH_S9321 == 1)
+		ret = max77660_reg_write(chip->parent,
+				MAX77660_CHG_SLAVE, MAX77660_CHARGER_FCHGCRNT,
+				MAX77660_FCHG_1300);
+		if (ret < 0)
+			return ret;
+#else
 		ret = max77660_reg_write(chip->parent,
 				MAX77660_CHG_SLAVE, MAX77660_CHARGER_FCHGCRNT,
 				MAX77660_FCHG_CRNT);
 		if (ret < 0)
 			return ret;
-
+#endif
 		ret = max77660_reg_read(chip->parent,
 				MAX77660_CHG_SLAVE,
 				MAX77660_CHARGER_FCHGCRNT, &read_val);
 		if (ret < 0)
 			return ret;
 
+#if (CONFIG_MACH_S9321 == 1)
+		/* Set TOPOFF to 10 min */
+		ret = max77660_reg_write(chip->parent,
+				MAX77660_CHG_SLAVE,
+				MAX77660_CHARGER_TOPOFF,
+				MAX77660_ITOPOFF_50MA |
+				MAX77660_TOPOFFT_DIS);			
+#else
 		/* Set TOPOFF to 10 min */
 		ret = max77660_reg_write(chip->parent,
 				MAX77660_CHG_SLAVE,
 				MAX77660_CHARGER_TOPOFF,
 				MAX77660_ITOPOFF_200MA |
 				MAX77660_TOPOFFT_60MIN);
+#endif
 		if (ret < 0)
 			return ret;
 //		printk("Ivan CONFIG_MACH_S9321 = %d!!!\n",CONFIG_MACH_S9321);
@@ -331,6 +347,15 @@ static int max77660_charger_init(struct max77660_chg_extcon *chip, int enable)
 			return ret;
 
 		/* Enable register settings for charging*/
+#if (CONFIG_MACH_S9321 == 1)
+		ret = max77660_reg_write(chip->parent,
+				MAX77660_CHG_SLAVE,
+				MAX77660_CHARGER_CHGCCMAX,
+				MAX77660_CHGCCMAX_1300);
+
+		if (ret < 0)
+			return ret;
+#else
 		ret = max77660_reg_write(chip->parent,
 				MAX77660_CHG_SLAVE,
 				MAX77660_CHARGER_CHGCCMAX,
@@ -338,7 +363,7 @@ static int max77660_charger_init(struct max77660_chg_extcon *chip, int enable)
 
 		if (ret < 0)
 			return ret;
-
+#endif
 		/* Enable top level charging */
 		ret = max77660_reg_write(chip->parent, MAX77660_PWR_SLAVE,
 				MAX77660_REG_GLOBAL_CFG1,
@@ -1001,6 +1026,19 @@ static int max77660_charger_thermal_configure(
 					    MAX77660_CHG_SLAVE,
 					    MAX77660_CHARGER_BATREGCTRL,
 					    (battery_threshold_voltage << 1));
+#ifdef CONFIG_MACH_S9321
+				if (tn_cur_temperature > BATT_HB_TEMP_WARM && tn_cur_temperature <= BATT_HB_TEMP_HOT) {
+					u8 statusv;
+					ret = max77660_reg_read(chip->parent,
+							MAX77660_CHG_SLAVE,
+							MAX77660_CHARGER_BATREGCTRL, &statusv);
+					statusv = statusv & 0xE1 | MAX77660_MBATREG_4000MV;
+					ret = max77660_reg_write(chip->parent,
+							MAX77660_CHG_SLAVE,
+							MAX77660_CHARGER_BATREGCTRL,
+							statusv);
+				}
+#endif
 			    if (ret < 0)
 				    return ret;
 			    battery_charging_status_update(chip->bc_dev,

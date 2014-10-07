@@ -32,6 +32,7 @@
 
 #define MAX17048_VCELL		0x02
 #define MAX17048_SOC		0x04
+#define MAX17048_MODE		0x06
 #define MAX17048_VER		0x08
 #define MAX17048_HIBRT		0x0A
 #define MAX17048_CONFIG		0x0C
@@ -50,26 +51,35 @@
 #define MAX17048_BATTERY_FULL	100
 #define MAX17048_BATTERY_LOW	15
 #define MAX17048_VERSION_NO	0x11
-#define TOPOFF_TIME_COUNT 30
+#define TOPOFF_TIME_COUNT 90
 #if (CONFIG_MACH_S9321 == 1)
 #define BATTERY_MAX_OCV 4350000
 #define BATTERY_RECHARGE_OCV 4300000
 #define BATTERY_RECHARGE_VCELL 4250
+#define BATTERY_SOFTWARE_POWER_OFF_LEVEL 3480
+#define BATTERY_HARDWARE_POWER_OFF_LEVEL 3200
 #else
 #define BATTERY_MAX_OCV 4200000
 #define BATTERY_RECHARGE_OCV 4180000
 #define BATTERY_RECHARGE_VCELL 4175
 #endif
 extern void max77660_power_forceoff(void);
+//static int max_fg_w[128];
+//static uint8_t g_17048_fg_byte[128];
 
-#define MAX17048_SOC_AVERAGE
-#define MAX17048_RECHARGER_HANDLE
+/*Ivan battery special config*/
+#define MAX17048_SOC_AVERAGE		/*Default Set: Set if you want to smooth the SOC change*/
+#define MAX17048_RECHARGER_HANDLE	/*Default Set: Set if you want charger continuous to turn on for while after 100% and re-charger only when battery voltage below BATTERY_RECHARGE_VCELL*/
+#define MAX17048_FAKE_FULL_HANDLE	/*Special handle for S9321, Full will be set if battery voltage >=99% and last for 15 minutes*/
+
+
 
 #define TN_BATT_HOT_STOP_TEMPERATURE		62 - 1
 #define TN_BATT_HOT_RESTART_TEMPERATURE		57
 
 #define VCELL_LEN	10
 #define VSOC_LEN	10
+#define TN_FAKE_FULL_COUNT 	45	//15 minutes
 
 static long g_fg_record_time;
 static int g_vcell_fifo[VCELL_LEN];
@@ -83,9 +93,13 @@ static struct timeval g_charger_discon_time;
 static struct timeval g_previous_time;
 #endif
 
+static long g_soc_special_counter = 0;
+
 static g_Batt_VL_IRQ_Count = 0;
 
 extern int tegra_get_bootloader_fg_status(void);
+
+//extern int get_tn_bat_test_count(void);
 
 struct max17048_chip {
 	struct i2c_client		*client;
@@ -213,13 +227,58 @@ static int max17048_get_ocv(struct max17048_chip *chip)
 	return ocv;
 }
 
+/* Return value in uV */
+static void max17048_debug_RCOMP_Seg(struct max17048_chip *chip)
+{
+	int r,i;
+	int reg[16];
+	int status;
+	int version;
+	int para;
+
+	status = max17048_read_word(chip->client, 0x1A);
+	version = max17048_read_word(chip->client, 0x08);
+	
+	r = max17048_write_word(chip->client, MAX17048_UNLOCK,
+			MAX17048_UNLOCK_VALUE);
+	if (r)
+		return r;
+	
+	for (i =0; i < 16; i++)
+	{
+	    reg[i] = max17048_read_word(chip->client, 0x80 +i*2);
+	}
+	
+	para = max17048_read_word(chip->client, 0x40);
+
+	r = max17048_write_word(chip->client, MAX17048_UNLOCK, 0);
+	WARN_ON(r);
+	printk("\n");
+	printk("Max17048_debug: Version[%x], Status[%x], Para[%x]\n",version,status >> 8,para);
+	printk("Max17048_debug: RCOMPSeg[%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x]\n",reg[0],reg[1],reg[2],reg[3],reg[4],reg[5],
+	       reg[6],reg[7],reg[8],reg[9],reg[10],reg[11],reg[12],reg[13],reg[14],reg[15]);
+
+	
+}
+
+
+
 static int max17048_rcomp_adjust(struct max17048_chip *chip)
 {
 	struct max17048_battery_model *mdata = chip->pdata->model_data;
-
+#if CONFIG_MACH_S9321
+//Ivan	int rcomp0 = 129;
+//Ivan	int tempCoUp = -1.05 * 100;
+//Ivan	int tempCoDown = 0 * 100;
+	
+	int rcomp0 = 161;
+	int tempCoUp = -2.05 * 100;
+	int tempCoDown = -1.25 * 100;	
+#else
 	int rcomp0 = 115;
 	int tempCoUp = -0.15 * 100;
 	int tempCoDown = -4.95 * 100;
+#endif
 	int rcomp, ret = 0;
 	int config_reg;
 	int temp;
@@ -240,6 +299,12 @@ static int max17048_rcomp_adjust(struct max17048_chip *chip)
 	else
 		rcomp = rcomp0 + (int)((temp - 20)*tempCoDown/(100));
 
+//Ivan added RCOMP clamped to 120 for temperature above 40 RCOMP(40˚C)
+#if CONFIG_MACH_S9321		
+	if (temp > 40)
+	    rcomp = 120;
+#endif
+
 	config_reg = max17048_read_word(chip->client, MAX17048_CONFIG);
 	if (config_reg < 0) {
 		dev_err(&chip->client->dev, "Error reading config register.\n");
@@ -257,6 +322,7 @@ static int max17048_rcomp_adjust(struct max17048_chip *chip)
 
 	return ret;
 }
+
 
 static int max17048_get_property(struct power_supply *psy,
 			    enum power_supply_property psp,
@@ -277,13 +343,17 @@ static int max17048_get_property(struct power_supply *psy,
 								    &temp);
 		    if (ret >=0)
 		    {
-				if (temp >= TN_BATT_HOT_STOP_TEMPERATURE)
-				{
-					val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
-					printk("Ivan max17048_get_property report disable!!\n");
-				}
-				else
-					val->intval = chip->status;
+//Ivan test code			
+//			if (get_tn_bat_test_count() > 50 && get_tn_bat_test_count() < 150)
+//			    temp = 65;
+//Ivan
+			if (temp >= TN_BATT_HOT_STOP_TEMPERATURE)
+			{
+			    val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
+			    printk("Ivan max17048_get_property report disable!!\n");
+			}
+			else
+			    val->intval = chip->status;
 		    }
 		}
 		else
@@ -372,6 +442,22 @@ static void max17048_get_soc(struct i2c_client *client)
 	if (chip->soc > MAX17048_BATTERY_FULL)
 		chip->soc = MAX17048_BATTERY_FULL;
 
+#if defined (MAX17048_FAKE_FULL_HANDLE) && (CONFIG_MACH_S9321 == 1)
+	if (chip->status == POWER_SUPPLY_STATUS_CHARGING)
+	{
+	    if (chip->soc >= 99)
+	    {
+		g_soc_special_counter ++;
+		if (g_soc_special_counter >= TN_FAKE_FULL_COUNT)
+		{
+			g_soc_special_counter = TN_FAKE_FULL_COUNT;
+			chip->soc = 100;
+		}
+	    }
+	}
+#endif
+	
+	
 	mutex_lock(&charger_gauge_list_mutex);
 	if (chip->soc >= MAX17048_BATTERY_FULL
 		&& chip->status == POWER_SUPPLY_STATUS_CHARGING) {
@@ -388,14 +474,15 @@ static void max17048_get_soc(struct i2c_client *client)
 					BATTERY_CHARGING_DONE);
 			chip->soc = MAX17048_BATTERY_FULL;
 #else
-			chip->soc = MAX17048_BATTERY_FULL-1;
+			chip->soc = MAX17048_BATTERY_FULL-1;			
 #endif
 		}
 	} else {
 	      if (chip->status == POWER_SUPPLY_STATUS_CHARGING)
 		topoff_count = 0;
 	}
-
+	
+		
 	if (chip->status == POWER_SUPPLY_STATUS_FULL && chip->charge_complete) {
 		ocv = max17048_get_ocv(chip);
 		
@@ -408,10 +495,11 @@ static void max17048_get_soc(struct i2c_client *client)
 			battery_set_charging(chip->bg_dev, false);
 			chip->soc = MAX17048_BATTERY_FULL;
 		} else if (topoff_count < TOPOFF_TIME_COUNT){
-		    printk("Ivan max17048_get_soc TOP_OFF: status = [%d]; topoff_count[%d]; is_recharged[%d]; charge_complete[%d]\n ", chip->status,topoff_count,chip->is_recharged,chip->charge_complete);
+		    chip->soc = MAX17048_BATTERY_FULL;	//Ivan added
+		    printk("Ivan max17048_get_soc TOP_OFF: status = [%d]; topoff_count[%d]; is_recharged[%d]; charge_complete[%d]; g_soc_special_counter[%d]\n ", chip->status,topoff_count,chip->is_recharged,chip->charge_complete,g_soc_special_counter);
 		    mutex_unlock(&charger_gauge_list_mutex);
 		    return;
-		}		
+		}
 		if (chip->vcell < BATTERY_RECHARGE_VCELL && !chip->is_recharged) {	//Ivan recharge depended on vcell voltage
 #else
 		if (ocv < BATTERY_MAX_OCV && !chip->is_recharged) {
@@ -437,7 +525,7 @@ static void max17048_get_soc(struct i2c_client *client)
 		chip->is_recharged = 0;
 	}
 	mutex_unlock(&charger_gauge_list_mutex);
-	printk("Ivan max17048_get_soc: status = [%d]; topoff_count[%d]; is_recharged[%d]; charge_complete[%d]; vcell[%d]\n ", chip->status,topoff_count,chip->is_recharged,chip->charge_complete,chip->vcell);
+	printk("Ivan max17048_get_soc: status = [%d]; topoff_count[%d]; is_recharged[%d]; charge_complete[%d]; vcell[%d]; g_soc_special_counter[%d]\n ", chip->status,topoff_count,chip->is_recharged,chip->charge_complete,chip->vcell,g_soc_special_counter);
 }
 
 static int max17048_read_soc_raw_value(struct battery_gauge_dev *bg_dev)
@@ -465,6 +553,13 @@ static void max17048_work(struct work_struct *work)
 	struct rtc_time tm;
 	
 	chip = container_of(work, struct max17048_chip, work.work);
+//Ivan added	
+//	status = max17048_read_word(chip->client, MAX17048_STATUS);
+//	printk("Ivan max17048_work Status[%x]\n",status >> 8 );
+//	status = max17048_read_word(chip->client, MAX17048_CONFIG);
+//	printk("Ivan max17048_work Config[%x]\n",status & 0xFF );
+
+//Ivan End
 	
 	max17048_get_vcell(chip->client);
 	max17048_get_soc(chip->client);
@@ -493,14 +588,11 @@ static void max17048_work(struct work_struct *work)
 	}
 //Ivan End
 //Ivan add new soc sample
-	if (diff > 19)				//HZ*20
-	{
-	  for (loop = 0; loop < (VSOC_LEN - 1); loop ++)
+	for (loop = 0; loop < (VSOC_LEN - 1); loop ++)
 	    g_soc_fifo[loop] = g_soc_fifo[loop+1];
-	  
-	  g_soc_fifo[VSOC_LEN-1] = chip->soc;
-	  g_previous_time = now;
-	}
+	
+	g_soc_fifo[VSOC_LEN-1] = chip->soc;
+
 //Ivan end
 //Ivan average the vcell voltage
 	for (loop = 0; loop < VSOC_LEN; loop ++)
@@ -509,8 +601,10 @@ static void max17048_work(struct work_struct *work)
 	if (avg_v > VSOC_LEN*80)
 	  avg_v += (VSOC_LEN - 1);		//stay at 100% if SOC > 99.2%
 	chip->soc = avg_v/VSOC_LEN;
-#endif
 	
+#endif
+	g_previous_time = now;
+
 	printk("Ivan time pass = %lu \n",diff);
 	
 	battery_gauge_get_battery_temperature(chip->bg_dev,&temp);
@@ -519,6 +613,10 @@ static void max17048_work(struct work_struct *work)
 	printk("\n");
 	printk("Ivan max17048_work vcell[%d], soc[%d], raw_soc[%d], temp[%d], rcomp[%d]\n",chip->vcell,chip->soc,chip->raw_soc,temp,rcomp>>8 );
 	printk("MAX17048_FG:%6d,%6d,%6d,%6d,%6d\n",g_fg_record_time,chip->vcell,temp,chip->raw_soc,rcomp>>8);
+	
+//Ivan print debug information for Maxim
+	if (g_fg_record_time == 100)
+	    max17048_debug_RCOMP_Seg(chip);
 	
 	schedule_delayed_work(&chip->work, MAX17048_DELAY);
 
@@ -543,14 +641,38 @@ static void max17048_work(struct work_struct *work)
 	
 	if (chip->status == POWER_SUPPLY_STATUS_DISCHARGING)
 	{
+#if (CONFIG_MACH_S9321 == 1)    
+	  if (avg_v < BATTERY_SOFTWARE_POWER_OFF_LEVEL + 10)
+#else	    
 	  if (avg_v < 3510)
+#endif
 	  {
-	    printk("Ivan Battery < 3510, Android power off...\n");	    
+	    printk("Ivan Battery < 3510, Android power off...\n");	   
+#if (CONFIG_MACH_S9321 == 1)    	    
+	    if (chip->soc > 0)
+	    {
+		printk("Ivan Battery Reset FG...\n");	    
+		max17048_write_word(chip->client, MAX17048_MODE, 0x4000);	//Reset FG
+	    }
+#endif	    
 	    chip->soc = 0;
 	  }
-	  if (avg_v < 3500)
+	  
+#if (CONFIG_MACH_S9321 == 1)    
+	  if (avg_v < BATTERY_HARDWARE_POWER_OFF_LEVEL)
+#else	    	  
+	  if (avg_v < 3500 && chip->soc != 0)
+#endif
 	  {
-	    printk("Ivan Battery too low (3.5V), force power off...\n");	    
+	    printk("Ivan Battery too low (3.5V), force power off...\n");	
+#if (CONFIG_MACH_S9321 == 1)    	    
+	    if (chip->soc > 0)
+	    {
+		printk("Ivan Battery Reset FG...\n");		
+		max17048_write_word(chip->client, MAX17048_MODE, 0x4000);	//Reset FG	    
+	    }
+#endif	    
+	    mdelay(200);	    
 	    max77660_power_forceoff();
 	  }
 	}
@@ -765,7 +887,9 @@ static int max17048_initialize(struct max17048_chip *chip)
 	status = max17048_read_word(client, MAX17048_VALRT);
 	printk("Ivan max17048_initialize valert[%x] reading[%x]\n",mdata->valert, status );
 //Ivan end
-	
+
+//Ivan S9321 non swapable battery
+#if (CONFIG_MACH_S9321 != 1)
 	ocv = max17048_read_word(client, MAX17048_OCV);
 	if (ocv < 0) {
 		dev_err(&client->dev, "%s: err %d\n", __func__, ocv);
@@ -773,7 +897,7 @@ static int max17048_initialize(struct max17048_chip *chip)
 	}
 	printk("max17048_initialize: ocv:%d\n",ocv);	
 	
-	if ((vcell + 650) > ocv /* && rcomp == 151*/)		//around 50mV
+	if ((vcell + 650) > ocv  && rcomp == 151)		//around 50mV
 	{
 	  if (!(bl_status & 0x100)/* && (bl_status & 0x01)*/)	//reset and no charger
 	  {
@@ -782,7 +906,7 @@ static int max17048_initialize(struct max17048_chip *chip)
 	    max17048_write_word(client, MAX17048_OCV, vcell + 650);
 	  }
 	}
-
+#endif
 	
 	ret = max17048_write_word(client, MAX17048_VRESET, mdata->vreset);
 	if (ret < 0)
@@ -989,6 +1113,9 @@ static int max17048_update_battery_status(struct battery_gauge_dev *bg_dev,
 	if (status == BATTERY_CHARGING) {
 		chip->charge_complete = 0;
 		chip->status = POWER_SUPPLY_STATUS_CHARGING;
+#if defined (MAX17048_FAKE_FULL_HANDLE) && (CONFIG_MACH_S9321 == 1)
+		g_soc_special_counter = 0;
+#endif
 	}
 	else if (status == BATTERY_CHARGING_DONE) {
 		chip->charge_complete = 1;
@@ -999,6 +1126,9 @@ static int max17048_update_battery_status(struct battery_gauge_dev *bg_dev,
 	} else {
 		chip->status = POWER_SUPPLY_STATUS_DISCHARGING;
 		chip->charge_complete = 0;
+#if defined (MAX17048_FAKE_FULL_HANDLE) && (CONFIG_MACH_S9321 == 1)
+		g_soc_special_counter = 0;
+#endif
 	}
 	chip->lasttime_status = chip->status;
 	power_supply_changed(&chip->battery);
@@ -1162,7 +1292,7 @@ static int __devinit max17048_probe(struct i2c_client *client,
 	INIT_DELAYED_WORK_DEFERRABLE(&chip->work, max17048_work);
 	schedule_delayed_work(&chip->work, 0);
 	ret = max17048_sysfs_create(client);
-	printk("MAX17048_FG:  TIME,  VOLT,  TEMP,   SOC, RCOMP\n");
+	printk("MAX17048_FG:  TIME,  VOLT,  TEMP,   SOC, RCOMP,CONFIG\n");
 	g_fg_record_time= 0;
 	g_vcell_fifo_init = 0;
 	if (ret)

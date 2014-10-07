@@ -45,8 +45,8 @@ static struct regulator *vdd_lcd_s_1v8;
 static struct regulator *vdd_sys_bl_3v7;
 static struct regulator *avdd_lcd_3v0_2v8;
 
-static bool dsi_otm1283a_720p_reg_requested;
-static bool dsi_otm1283a_720p_gpio_requested = 0;
+static bool dsi_otm1283a_otp_720p_reg_requested;
+static bool dsi_otm1283a_otp_720p_gpio_requested = 0;
 static bool is_bl_powered;
 static bool is_in_initialized_mode;
 static struct platform_device *disp_device;
@@ -228,14 +228,14 @@ static struct LCM_setting_table lcm_initialization_setting[] = {
 	{0xCF,14,{0x70,0x00,0x00,0x10,0x00,0x00,0x00,0x70,0x00,0x00,0x10,0x00,0x00,0x00}}, 
 
 	{0x00,1,{0xC0}}, 
-	{0xCF,11,{0x01,0x01,0x20,0x20,0x00,0x00,0x01,0x80,0x01,0x03,0x08}},//0x02 
+	{0xCF,11,{0x01,0x01,0x20,0x20,0x00,0x00,0x01,0x80,0x00,0x03,0x08}},
 
 	{0x00,1,{0x00}}, 
 	{0xD8,2,{0xAC,0xAC}}, 
-
+/*
 	{0x00,1,{0x00}}, 
 	{0xD9,1,{0xA2}},//\u0153тВагА A2 -2.0V 
-
+*/
 	{0x00,1,{0x00}}, 
 	{0xE1,16,{0x04,0x09,0x12,0x0C,0x05,0x0D,0x0A,0x08,0x05,0x08,0x0E,0x07,0x0E,0x12,0x12,0x0A}}, 
 
@@ -263,42 +263,6 @@ static struct LCM_setting_table lcm_initialization_setting[] = {
 	{0x00,1,{0x8B}}, 
 	{0xC4,1,{0x40}}, 
 
-	/***********************CELEVER COLOR SETTING FOR CE ****************************************/
-#ifdef  ENABLE_CE	
-	{0x00,1,{0xa0}},             
-	{0xd6,12,{0x01,0xCD,0x01,0xCD,0x01,0xCD,0x01,0xCD,
-			0x01,0xCD,0x01,0xCD}}, 
-			
-	{0x00,1,{0xB0}},         
-	{0xd6,12,{0x01,0xCD,0x01,0xCD,0x01,0xCD,0x01,0xCD,
-			0x01,0xCD,0x01,0xCD}}, 
-        
-	{0x00,1,{0xC0}},         
-	{0xd6,12,{0x89,0x11,0x89,0x89,0x11,0x89,0x89,0x11,
-			0x89,0x89,0x11,0x89}}, 
-        
-	{0x00,1,{0xD0}},         
-	{0xd6,6,{0x89,0x11,0x89,0x89,0x11,0x89}}, 
-
-	{0x00,1,{0xE0}},         
-	{0xd6,12,{0x44,0x11,0x44,0x44,0x11,0x44,0x44,0x11,
-			0x44,0x44,0x11,0x44}}, 
-
-	{0x00,1,{0xF0}},         
-	{0xd6,6,{0x44,0x11,0x44,0x44,0x11,0x44}}, 
-
-	
-	{0x00,1,{0x90}},         
-	{0xd6,1,{0x00}},      
-	
-	{0x00,1,{0x81}},         
-	{0xd6,2,{0x03,0xff}},      
-	
-	{0x00,1,{0x00}},         
-	{0x55,1,{0x80}},          
-#endif  
-	
-/************************************************************************/
 	
 //	{0x00,1,{0x00}},         // Gamma vdd  reduce from 4.8 to 4.0
 //	{0xd8,2,{0x83,0x83}},      
@@ -324,7 +288,7 @@ static struct LCM_setting_table lcm_initialization_setting[] = {
 
 
 #ifdef CONFIG_TEGRA_DC_CMU
-static struct tegra_dc_cmu dsi_otm1283a_720p_cmu = {
+static struct tegra_dc_cmu dsi_otm1283a_otp_720p_cmu = {
 	/* lut1 maps sRGB to linear space. */
 	{
 		0,    1,    2,    4,    5,    6,    7,    9,
@@ -492,7 +456,7 @@ static struct tegra_dc_cmu dsi_otm1283a_720p_cmu = {
 };
 #endif
 
-static tegra_dc_bl_output dsi_otm1283a_720p_max8831_bl_response_curve = {
+static tegra_dc_bl_output dsi_otm1283a_otp_720p_max8831_bl_response_curve = {
 	0, 1, 3, 5, 7, 9, 11, 13,
 	15, 17, 19, 21, 22, 23, 25, 26,
 	28, 29, 30, 32, 33, 34, 36, 37,
@@ -527,7 +491,7 @@ static tegra_dc_bl_output dsi_otm1283a_720p_max8831_bl_response_curve = {
 	247, 247, 248, 250, 251, 252, 253, 255
 };
 
-static tegra_dc_bl_output dsi_otm1283a_720p_lm3528_bl_response_curve = {
+static tegra_dc_bl_output dsi_otm1283a_otp_720p_lm3528_bl_response_curve = {
 	1, 33, 61, 77, 88, 97, 105, 111,
 	116, 121, 125, 129, 132, 136, 139, 141,
 	144, 146, 149, 151, 153, 155, 157, 158,
@@ -599,11 +563,11 @@ static tegra_dc_bl_output temp_bl_output_measured = {
 
 static p_tegra_dc_bl_output bl_output;
 
-static p_tegra_dc_bl_output dsi_otm1283a_720p_bl_response_curve;
+static p_tegra_dc_bl_output dsi_otm1283a_otp_720p_bl_response_curve;
 
-static struct tegra_dsi_out dsi_otm1283a_720p_pdata;
+static struct tegra_dsi_out dsi_otm1283a_otp_720p_pdata;
 
-static int __maybe_unused dsi_otm1283a_720p_bl_notify(struct device *unused,
+static int __maybe_unused dsi_otm1283a_otp_720p_bl_notify(struct device *unused,
 							int brightness)
 {
 	int cur_sd_brightness = atomic_read(&sd_brightness);
@@ -615,11 +579,11 @@ static int __maybe_unused dsi_otm1283a_720p_bl_notify(struct device *unused,
 	if (brightness > 255)
 		pr_info("Error: Brightness > 255!\n");
 	else
-		brightness = dsi_otm1283a_720p_bl_response_curve[brightness];
+		brightness = dsi_otm1283a_otp_720p_bl_response_curve[brightness];
 
 	return brightness;
 }
-static bool __maybe_unused dsi_otm1283a_720p_check_bl_power(void)
+static bool __maybe_unused dsi_otm1283a_otp_720p_check_bl_power(void)
 {
 	return is_bl_powered;
 }
@@ -627,7 +591,7 @@ static bool __maybe_unused dsi_otm1283a_720p_check_bl_power(void)
 /*
 	LG uses I2C max8831 blacklight device
 */
-static struct led_info dsi_otm1283a_720p_max8831_leds[] = {
+static struct led_info dsi_otm1283a_otp_720p_max8831_leds[] = {
 	[MAX8831_ID_LED3] = {
 		.name = "max8831:red:pluto",
 	},
@@ -639,60 +603,60 @@ static struct led_info dsi_otm1283a_720p_max8831_leds[] = {
 	},
 };
 
-static struct platform_max8831_backlight_data dsi_otm1283a_720p_max8831_bl_data = {
+static struct platform_max8831_backlight_data dsi_otm1283a_otp_720p_max8831_bl_data = {
 	.id	= -1,
 	.name	= "pluto_display_bl",
 	.max_brightness	= MAX8831_BL_LEDS_MAX_CURR,
 	.dft_brightness	= 100,
-	.notify	= dsi_otm1283a_720p_bl_notify,
-	.is_powered = dsi_otm1283a_720p_check_bl_power,
+	.notify	= dsi_otm1283a_otp_720p_bl_notify,
+	.is_powered = dsi_otm1283a_otp_720p_check_bl_power,
 };
 
-static struct max8831_subdev_info dsi_otm1283a_720p_max8831_subdevs[] = {
+static struct max8831_subdev_info dsi_otm1283a_otp_720p_max8831_subdevs[] = {
 	{
 		.id = MAX8831_ID_LED3,
 		.name = "max8831_led_bl",
-		.platform_data = &dsi_otm1283a_720p_max8831_leds[MAX8831_ID_LED3],
+		.platform_data = &dsi_otm1283a_otp_720p_max8831_leds[MAX8831_ID_LED3],
 		.pdata_size = sizeof(
-				dsi_otm1283a_720p_max8831_leds[MAX8831_ID_LED3]),
+				dsi_otm1283a_otp_720p_max8831_leds[MAX8831_ID_LED3]),
 	}, {
 		.id = MAX8831_ID_LED4,
 		.name = "max8831_led_bl",
-		.platform_data = &dsi_otm1283a_720p_max8831_leds[MAX8831_ID_LED4],
+		.platform_data = &dsi_otm1283a_otp_720p_max8831_leds[MAX8831_ID_LED4],
 		.pdata_size = sizeof(
-				dsi_otm1283a_720p_max8831_leds[MAX8831_ID_LED4]),
+				dsi_otm1283a_otp_720p_max8831_leds[MAX8831_ID_LED4]),
 	}, {
 		.id = MAX8831_ID_LED5,
 		.name = "max8831_led_bl",
-		.platform_data = &dsi_otm1283a_720p_max8831_leds[MAX8831_ID_LED5],
+		.platform_data = &dsi_otm1283a_otp_720p_max8831_leds[MAX8831_ID_LED5],
 		.pdata_size = sizeof(
-				dsi_otm1283a_720p_max8831_leds[MAX8831_ID_LED5]),
+				dsi_otm1283a_otp_720p_max8831_leds[MAX8831_ID_LED5]),
 	}, {
 		.id = MAX8831_BL_LEDS,
 		.name = "max8831_display_bl",
-		.platform_data = &dsi_otm1283a_720p_max8831_bl_data,
-		.pdata_size = sizeof(dsi_otm1283a_720p_max8831_bl_data),
+		.platform_data = &dsi_otm1283a_otp_720p_max8831_bl_data,
+		.pdata_size = sizeof(dsi_otm1283a_otp_720p_max8831_bl_data),
 	},
 };
 
-static struct max8831_platform_data dsi_otm1283a_720p_max8831 = {
-	.num_subdevs = ARRAY_SIZE(dsi_otm1283a_720p_max8831_subdevs),
-	.subdevs = dsi_otm1283a_720p_max8831_subdevs,
+static struct max8831_platform_data dsi_otm1283a_otp_720p_max8831 = {
+	.num_subdevs = ARRAY_SIZE(dsi_otm1283a_otp_720p_max8831_subdevs),
+	.subdevs = dsi_otm1283a_otp_720p_max8831_subdevs,
 };
 
-static struct i2c_board_info dsi_otm1283a_720p_i2c_led_info = {
+static struct i2c_board_info dsi_otm1283a_otp_720p_i2c_led_info = {
 	.type		= "max8831",
 	.addr		= 0x4d,
-	.platform_data	= &dsi_otm1283a_720p_max8831,
+	.platform_data	= &dsi_otm1283a_otp_720p_max8831,
 };
 
 static struct lm3528_platform_data lm3528_pdata = {
 	.dft_brightness	= 100,
-	.is_powered = dsi_otm1283a_720p_check_bl_power,
-	.notify	= dsi_otm1283a_720p_bl_notify,
+	.is_powered = dsi_otm1283a_otp_720p_check_bl_power,
+	.notify	= dsi_otm1283a_otp_720p_bl_notify,
 };
 
-static struct i2c_board_info lm3528_dsi_otm1283a_720p_i2c_led_info = {
+static struct i2c_board_info lm3528_dsi_otm1283a_otp_720p_i2c_led_info = {
 	.type		= "lm3528_display_bl",
 	.addr		= 0x36,
 	.platform_data	= &lm3528_pdata,
@@ -718,7 +682,7 @@ static unsigned int dsi_l_atlantis_edp_brightness[] = {
 };
 
 #if 1
-static int otm1283a_backlight_notify(struct device *unused, int brightness)
+static int otm1283a_otp_backlight_notify(struct device *unused, int brightness)
 {
 	int cur_sd_brightness = atomic_read(&sd_brightness);
 
@@ -734,7 +698,7 @@ static int otm1283a_backlight_notify(struct device *unused, int brightness)
 	return brightness;
 }
 
-static int __maybe_unused otm1283a_check_fb(struct device *dev,
+static int __maybe_unused otm1283a_otp_check_fb(struct device *dev,
 					     struct fb_info *info)
 {
 	return info->device == &disp_device->dev;
@@ -748,10 +712,10 @@ static struct platform_pwm_backlight_data external_pwm_disp1_backlight_data = {
 //	.pwm_period_ns  = 1000000,
 	.dft_brightness	= BOOTLOADER_BL_INTENSITY,
 	.pwm_period_ns	= 100000,	
-	.notify		= otm1283a_backlight_notify,
+	.notify		= otm1283a_otp_backlight_notify,
 	.pwm_gpio	= TEGRA_GPIO_PG2,
 	/* Only toggle backlight on fb blank notifications for disp1 */
-	.check_fb	= otm1283a_check_fb,
+	.check_fb	= otm1283a_otp_check_fb,
 };
 
 static struct platform_device external_pwm_disp1_backlight_device = {
@@ -762,7 +726,7 @@ static struct platform_device external_pwm_disp1_backlight_device = {
 	},
 };
 
-static struct platform_device *otm1283a_bl_devices[]  = {
+static struct platform_device *otm1283a_otp_bl_devices[]  = {
 	&external_pwm_disp1_backlight_device,
 };
 
@@ -775,7 +739,7 @@ static struct platform_device *otm1283a_bl_devices[]  = {
  * gpio_conf_to_sfio should be TEGRA_GPIO_PW1: set LCD_M1 pin to SFIO
  */
 #if 0
-static struct platform_tegra_pwm_backlight_data otm1283a_disp1_backlight_data = {
+static struct platform_tegra_pwm_backlight_data otm1283a_otp_disp1_backlight_data = {
 	.which_dc = 0,
 	.which_pwm = TEGRA_PWM_PM0,
 	.max_brightness	= 256,
@@ -786,49 +750,49 @@ static struct platform_tegra_pwm_backlight_data otm1283a_disp1_backlight_data = 
 	.clk_select = 2,
 };
 
-static struct platform_device otm1283a_disp1_backlight_device = {
+static struct platform_device otm1283a_otp_disp1_backlight_device = {
 	.name	= "tegra-pwm-bl",
 	.id	= -1,
 	.dev	= {
-		.platform_data = &otm1283a_disp1_backlight_data,
+		.platform_data = &otm1283a_otp_disp1_backlight_data,
 	},
 };
 
-static struct platform_device *otm1283a_trgra_pwm_bl_devices[] __initdata = {
-	&otm1283a_disp1_backlight_device,
+static struct platform_device *otm1283a_otp_trgra_pwm_bl_devices[] __initdata = {
+	&otm1283a_otp_disp1_backlight_device,
 };
 #endif
 
 
 
-static struct platform_device *otm1283a_gfx_devices[] __initdata = {
+static struct platform_device *otm1283a_otp_gfx_devices[] __initdata = {
 	&tegra_pwfm0_device,
 };
 
-static int __init dsi_otm1283a_720p_register_bl_dev(void)
+static int __init dsi_otm1283a_otp_720p_register_bl_dev(void)
 {
-	dsi_otm1283a_720p_max8831_bl_data.edp_states =
+	dsi_otm1283a_otp_720p_max8831_bl_data.edp_states =
 		dsi_l_ceres_edp_states;
-	dsi_otm1283a_720p_max8831_bl_data.edp_brightness =
+	dsi_otm1283a_otp_720p_max8831_bl_data.edp_brightness =
 			dsi_l_ceres_edp_brightness;
-		dsi_otm1283a_720p_bl_response_curve =
-				dsi_otm1283a_720p_max8831_bl_response_curve;	
+		dsi_otm1283a_otp_720p_bl_response_curve =
+				dsi_otm1283a_otp_720p_max8831_bl_response_curve;	
 	bl_output = temp_bl_output_measured;
 
-	platform_add_devices(otm1283a_gfx_devices,
-		ARRAY_SIZE(otm1283a_gfx_devices));
+	platform_add_devices(otm1283a_otp_gfx_devices,
+		ARRAY_SIZE(otm1283a_otp_gfx_devices));
 		
-	platform_add_devices(otm1283a_bl_devices,ARRAY_SIZE(otm1283a_bl_devices));
+	platform_add_devices(otm1283a_otp_bl_devices,ARRAY_SIZE(otm1283a_otp_bl_devices));
 
 /*
-	platform_add_devices(otm1283a_trgra_pwm_bl_devices,
-		ARRAY_SIZE(otm1283a_trgra_pwm_bl_devices));		
+	platform_add_devices(otm1283a_otp_trgra_pwm_bl_devices,
+		ARRAY_SIZE(otm1283a_otp_trgra_pwm_bl_devices));		
 */
 	return 0;
 }
 
 //1366 (V) 1062 (H) 65281140
-struct tegra_dc_mode dsi_otm1283a_720p_modes[] = {
+struct tegra_dc_mode dsi_otm1283a_otp_720p_modes[] = {
 	{
 		.pclk = 67900000,//86750000,//74180000,
 //		.pclk = 66700000,
@@ -847,11 +811,11 @@ struct tegra_dc_mode dsi_otm1283a_720p_modes[] = {
 
 
 
-static int dsi_otm1283a_720p_reg_get(void)
+static int dsi_otm1283a_otp_720p_reg_get(void)
 {
 	int err = 0;
 
-	if (dsi_otm1283a_720p_reg_requested)
+	if (dsi_otm1283a_otp_720p_reg_requested)
 		return 0;
 
 	avdd_lcd_3v0_2v8 = regulator_get(NULL, "avdd_lcd");
@@ -879,37 +843,37 @@ static int dsi_otm1283a_720p_reg_get(void)
 		goto fail;
 	} 
 
-	dsi_otm1283a_720p_reg_requested = true;
+	dsi_otm1283a_otp_720p_reg_requested = true;
 	return 0;
 fail:
 	return err;
 }
 
-static int dsi_otm1283a_720p_gpio_get(void)
+static int dsi_otm1283a_otp_720p_gpio_get(void)
 {
 	int err = 0;
 
-	if (dsi_otm1283a_720p_gpio_requested)
+	if (dsi_otm1283a_otp_720p_gpio_requested)
 		return 0;
 
-	err = gpio_request(dsi_otm1283a_720p_pdata.dsi_panel_rst_gpio,
+	err = gpio_request(dsi_otm1283a_otp_720p_pdata.dsi_panel_rst_gpio,
 		"panel rst");
 	if (err < 0) {
 		printk("panel reset gpio request failed\n");
 //Ivan		goto fail;
 	}
-	//printk("Ivan otm1283a dsi_panel_rst_gpio = %d \n", dsi_otm1283a_720p_pdata.dsi_panel_rst_gpio);
+	//printk("Ivan otm1283a_otp dsi_panel_rst_gpio = %d \n", dsi_otm1283a_otp_720p_pdata.dsi_panel_rst_gpio);
 
-	err = gpio_request(dsi_otm1283a_720p_pdata.dsi_panel_bl_en_gpio,
+	err = gpio_request(dsi_otm1283a_otp_720p_pdata.dsi_panel_bl_en_gpio,
 		"panel backlight");
 	if (err < 0) {
 		printk("panel backlight gpio request failed\n");
 //Ivan		goto fail;
 	}
-	//printk("Ivan otm1283a dsi_panel_bl_en_gpio = %d \n", dsi_otm1283a_720p_pdata.dsi_panel_bl_en_gpio);
+	//printk("Ivan otm1283a_otp dsi_panel_bl_en_gpio = %d \n", dsi_otm1283a_otp_720p_pdata.dsi_panel_bl_en_gpio);
 	
 /*
-	err = gpio_request(dsi_otm1283a_720p_pdata.dsi_panel_bl_pwm_gpio,
+	err = gpio_request(dsi_otm1283a_otp_720p_pdata.dsi_panel_bl_pwm_gpio,
 		"panel pwm");
 	if (err < 0) {
 		printk("panel backlight pwm gpio request failed\n");
@@ -917,7 +881,7 @@ static int dsi_otm1283a_720p_gpio_get(void)
 //Ivan		goto fail;
 	}
 */
-	dsi_otm1283a_720p_gpio_requested = true;
+	dsi_otm1283a_otp_720p_gpio_requested = true;
 	return 0;
 //fail:
 //	return err;
@@ -940,31 +904,31 @@ static void  turn_off_bl(void)
 	{
 		gpio_direction_output(
 			panel_of.panel_gpio[TEGRA_GPIO_BL_ENABLE], 0);
-	   	// printk("Ivan dsi_otm1283a_720p_disable 1 \n");	
+	   	// printk("Ivan dsi_otm1283a_otp_720p_disable 1 \n");	
 	}
 	else
 	{
 		gpio_direction_output(
-			dsi_otm1283a_720p_pdata.dsi_panel_bl_en_gpio, 0);
-	    	//printk("Ivan dsi_otm1283a_720p_disable 2 \n");	
+			dsi_otm1283a_otp_720p_pdata.dsi_panel_bl_en_gpio, 0);
+	    	//printk("Ivan dsi_otm1283a_otp_720p_disable 2 \n");	
 	}
 	tobl = true;
 }
 
-static int dsi_otm1283a_720p_enable(struct device *dev)
+static int dsi_otm1283a_otp_720p_enable(struct device *dev)
 {
 	int err = 0;
 
 
-	//printk("Ivan dsi_otm1283a_720p_enable\n");
+	//printk("Ivan dsi_otm1283a_otp_720p_enable\n");
 
-	err = dsi_otm1283a_720p_reg_get();
+	err = dsi_otm1283a_otp_720p_reg_get();
 	if (err < 0) {
 		//printk("dsi regulator get failed\n");
 		goto fail;
 	}
 
-	err = dsi_otm1283a_720p_gpio_get();
+	err = dsi_otm1283a_otp_720p_gpio_get();
 	if (err < 0) {
 		printk("dsi gpio request failed\n");
 		goto fail;
@@ -978,8 +942,8 @@ static int dsi_otm1283a_720p_enable(struct device *dev)
 	else
 	{
 		if (is_in_initialized_mode)
-			gpio_direction_output(dsi_otm1283a_720p_pdata.dsi_panel_rst_gpio, 0);
-	    //printk("Ivan dsi_otm1283a_720p_enable 1\n");
+			gpio_direction_output(dsi_otm1283a_otp_720p_pdata.dsi_panel_rst_gpio, 0);
+	    //printk("Ivan dsi_otm1283a_otp_720p_enable 1\n");
 	}
 	
 	if (avdd_lcd_3v0_2v8) {
@@ -988,7 +952,7 @@ static int dsi_otm1283a_720p_enable(struct device *dev)
 			printk("avdd_lcd regulator enable failed\n");
 			goto fail;
 		}
-		regulator_set_voltage(avdd_lcd_3v0_2v8, 3000000, 3000000);
+		regulator_set_voltage(avdd_lcd_3v0_2v8, 2800000, 2800000);
 	}
 
 	usleep_range(3000, 5000);
@@ -999,7 +963,7 @@ static int dsi_otm1283a_720p_enable(struct device *dev)
 			printk("vdd_lcd_1v8_s regulator enable failed\n");
 			goto fail;
 		}
-	  //  printk("Ivan dsi_otm1283a_720p_enable 3\n");		
+	  //  printk("Ivan dsi_otm1283a_otp_720p_enable 3\n");		
 	}
 	usleep_range(3000, 5000);
 
@@ -1009,28 +973,28 @@ static int dsi_otm1283a_720p_enable(struct device *dev)
 			printk("vdd_sys_bl regulator enable failed\n");
 			goto fail;
 		}
-	   // printk("Ivan dsi_otm1283a_720p_enable 4\n");		
+	   // printk("Ivan dsi_otm1283a_otp_720p_enable 4\n");		
 	}
 	usleep_range(3000, 5000);  
 
 /*	gpio_direction_output(
-		dsi_otm1283a_720p_pdata.dsi_panel_rst_gpio, 1);
+		dsi_otm1283a_otp_720p_pdata.dsi_panel_rst_gpio, 1);
 	usleep_range(1000, 5000);
 
 	gpio_direction_output(
-		dsi_otm1283a_720p_pdata.dsi_panel_rst_gpio, 0);	
+		dsi_otm1283a_otp_720p_pdata.dsi_panel_rst_gpio, 0);	
 	usleep_range(1000, 5000);
 
 	*/
 	
 #if 0 //def DSI_PANEL_RESET
 	gpio_direction_output(
-		dsi_otm1283a_720p_pdata.dsi_panel_rst_gpio, 1);	
+		dsi_otm1283a_otp_720p_pdata.dsi_panel_rst_gpio, 1);	
 	msleep(20);
 #endif
 
 	/* enable backlight */
-	//gpio_direction_output(dsi_otm1283a_720p_pdata.dsi_panel_bl_en_gpio, 1);	
+	//gpio_direction_output(dsi_otm1283a_otp_720p_pdata.dsi_panel_bl_en_gpio, 1);	
 
 	is_bl_powered = true;
 	is_in_initialized_mode = true;
@@ -1049,30 +1013,30 @@ fail:
 //Ivan static u8 s_ParaDisplayOn[] = {0x29};
 
 
-static int dsi_otm1283a_720p_hw_reset(struct device *dev)
+static int dsi_otm1283a_otp_720p_hw_reset(struct device *dev)
 {
 	gpio_direction_output(
-		dsi_otm1283a_720p_pdata.dsi_panel_rst_gpio, 1);
+		dsi_otm1283a_otp_720p_pdata.dsi_panel_rst_gpio, 1);
 	return 0;
 }
 
 
-static int dsi_otm1283a_720p_disable(void)
+static int dsi_otm1283a_otp_720p_disable(void)
 {
-	//printk("Ivan dsi_otm1283a_720p_disable\n");
+	//printk("Ivan dsi_otm1283a_otp_720p_disable\n");
     
 /*	if (gpio_is_valid(panel_of.panel_gpio[TEGRA_GPIO_BL_ENABLE]))
 	{
 		gpio_direction_output(
 			panel_of.panel_gpio[TEGRA_GPIO_BL_ENABLE], 0);
-	    printk("Ivan dsi_otm1283a_720p_disable 1 \n");
+	    printk("Ivan dsi_otm1283a_otp_720p_disable 1 \n");
 		
 	}
 	else
 	{
 		gpio_direction_output(
-			dsi_otm1283a_720p_pdata.dsi_panel_bl_en_gpio, 0);
-	    printk("Ivan dsi_otm1283a_720p_disable 2 \n");
+			dsi_otm1283a_otp_720p_pdata.dsi_panel_bl_en_gpio, 0);
+	    printk("Ivan dsi_otm1283a_otp_720p_disable 2 \n");
 		
 	}  
 	*/
@@ -1083,7 +1047,7 @@ static int dsi_otm1283a_720p_disable(void)
 			panel_of.panel_gpio[TEGRA_GPIO_RESET], 0);
 	else
 		gpio_direction_output(
-			dsi_otm1283a_720p_pdata.dsi_panel_rst_gpio, 0);
+			dsi_otm1283a_otp_720p_pdata.dsi_panel_rst_gpio, 0);
 
 	if (vdd_sys_bl_3v7)
 		regulator_disable(vdd_sys_bl_3v7);  
@@ -1097,7 +1061,7 @@ static int dsi_otm1283a_720p_disable(void)
 	return 0;
 }
 
-static struct tegra_dsi_out dsi_otm1283a_720p_pdata = {
+static struct tegra_dsi_out dsi_otm1283a_otp_720p_pdata = {
 	.n_data_lanes = 4,
 
 	.refresh_rate = 60,
@@ -1112,63 +1076,63 @@ static struct tegra_dsi_out dsi_otm1283a_720p_pdata = {
 
 	.panel_reset = DSI_PANEL_RESET,
 	.power_saving_suspend = true,
-//	.dsi_init_cmd = dsi_otm1283a_720p_init,
-//	.n_init_cmd = ARRAY_SIZE(dsi_otm1283a_720p_init),
+//	.dsi_init_cmd = dsi_otm1283a_otp_720p_init,
+//	.n_init_cmd = ARRAY_SIZE(dsi_otm1283a_otp_720p_init),
 };
 
-static void dsi_otm1283a_720p_dc_out_init(struct tegra_dc_out *dc)
+static void dsi_otm1283a_otp_720p_dc_out_init(struct tegra_dc_out *dc)
 {
 	//edit by Magnum 2013-11-14
 	u16 init_count = sizeof(lcm_initialization_setting)/sizeof(struct LCM_setting_table);
-	rebuild_tegra_lcm(lcm_initialization_setting, &dsi_otm1283a_720p_pdata,init_count);
+	rebuild_tegra_lcm(lcm_initialization_setting, &dsi_otm1283a_otp_720p_pdata,init_count);
 	
-	dc->dsi = &dsi_otm1283a_720p_pdata;
+	dc->dsi = &dsi_otm1283a_otp_720p_pdata;
 	dc->parent_clk = "pll_d_out0";
-	dc->modes = dsi_otm1283a_720p_modes;
-	dc->n_modes = ARRAY_SIZE(dsi_otm1283a_720p_modes);
-	dc->enable = dsi_otm1283a_720p_enable;
-    dc->hw_reset = dsi_otm1283a_720p_hw_reset;
-	dc->disable = dsi_otm1283a_720p_disable;
+	dc->modes = dsi_otm1283a_otp_720p_modes;
+	dc->n_modes = ARRAY_SIZE(dsi_otm1283a_otp_720p_modes);
+	dc->enable = dsi_otm1283a_otp_720p_enable;
+        dc->hw_reset = dsi_otm1283a_otp_720p_hw_reset;
+	dc->disable = dsi_otm1283a_otp_720p_disable;
 	dc->width = 62;
 	dc->height = 110;
 	//dc->flags = DC_CTRL_MODE;
 	dc->flags = DC_CTRL_MODE | TEGRA_DC_OUT_INITIALIZED_MODE;
 	is_in_initialized_mode = false;
 }
-static void dsi_otm1283a_720p_fb_data_init(struct tegra_fb_data *fb)
+static void dsi_otm1283a_otp_720p_fb_data_init(struct tegra_fb_data *fb)
 {
-	fb->xres = dsi_otm1283a_720p_modes[0].h_active;
-	fb->yres = dsi_otm1283a_720p_modes[0].v_active;
+	fb->xres = dsi_otm1283a_otp_720p_modes[0].h_active;
+	fb->yres = dsi_otm1283a_otp_720p_modes[0].v_active;
 }
 
-static void dsi_otm1283a_720p_sd_settings_init(struct tegra_dc_sd_settings *settings)
+static void dsi_otm1283a_otp_720p_sd_settings_init(struct tegra_dc_sd_settings *settings)
 {
 	struct board_info bi;
 	tegra_get_display_board_info(&bi);
 	settings->bl_device_name = "pwm-backlight";
 }
 
-static void dsi_otm1283a_720p_set_disp_device(
+static void dsi_otm1283a_otp_720p_set_disp_device(
 	struct platform_device *ceres_display_device)
 {
 	disp_device = ceres_display_device;
 }
 
 #ifdef CONFIG_TEGRA_DC_CMU
-static void dsi_otm1283a_720p_cmu_init(struct tegra_dc_platform_data *pdata)
+static void dsi_otm1283a_otp_720p_cmu_init(struct tegra_dc_platform_data *pdata)
 {
-	pdata->cmu = &dsi_otm1283a_720p_cmu;
+	pdata->cmu = &dsi_otm1283a_otp_720p_cmu;
 }
 #endif
 
-struct tegra_panel __initdata dsi_otm1283a_720p = {
-	.init_sd_settings = dsi_otm1283a_720p_sd_settings_init,
-	.init_dc_out = dsi_otm1283a_720p_dc_out_init,
-	.init_fb_data = dsi_otm1283a_720p_fb_data_init,
-	.register_bl_dev = dsi_otm1283a_720p_register_bl_dev,
-	.set_disp_device = dsi_otm1283a_720p_set_disp_device,	
+struct tegra_panel __initdata dsi_otm1283a_otp_720p = {
+	.init_sd_settings = dsi_otm1283a_otp_720p_sd_settings_init,
+	.init_dc_out = dsi_otm1283a_otp_720p_dc_out_init,
+	.init_fb_data = dsi_otm1283a_otp_720p_fb_data_init,
+	.register_bl_dev = dsi_otm1283a_otp_720p_register_bl_dev,
+	.set_disp_device = dsi_otm1283a_otp_720p_set_disp_device,	
 #ifdef CONFIG_TEGRA_DC_CMU
-	.init_cmu_data = dsi_otm1283a_720p_cmu_init,
+	.init_cmu_data = dsi_otm1283a_otp_720p_cmu_init,
 #endif
 };
-EXPORT_SYMBOL(dsi_otm1283a_720p);
+EXPORT_SYMBOL(dsi_otm1283a_otp_720p);

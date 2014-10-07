@@ -95,6 +95,21 @@
 #include <linux/module.h>
 #include <media/dw9714a.h>
 
+#if defined(CONFIG_MACH_S9321)
+
+#define DW9714A_FOCAL_LENGTH	 0x406ccccd	/*	(3.70f) */
+#define DW9714A_FNUMBER			 0x400ccccd /* (2.2f) */
+#define DW9714A_SLEW_RATE		1
+#define DW9714A_ACTUATOR_RANGE		1023
+#define DW9714A_SETTLETIME		15
+#define DW9714A_FOCUS_MACRO		535
+#define DW9714A_FOCUS_INFINITY		70
+#define DW9714A_POS_LOW_DEFAULT		0
+#define DW9714A_POS_HIGH_DEFAULT		1023
+#define DW9714A_MAX_RETRIES		3
+
+#else
+
 #define DW9714A_FOCAL_LENGTH	 0x406ccccd	/*	(3.70f) */
 #define DW9714A_FNUMBER			 0x400ccccd /* (2.2f) */
 #define DW9714A_SLEW_RATE		1
@@ -105,6 +120,10 @@
 #define DW9714A_POS_LOW_DEFAULT		0
 #define DW9714A_POS_HIGH_DEFAULT		1023
 #define DW9714A_MAX_RETRIES		3
+
+#endif
+#define DW9714A_JUMP_BACK_STEP		100
+
 /*
 static struct nvc_gpio_init dw9714a_gpio[] = {
 	{ DW9714A_GPIO_TYPE_PWRDN, GPIOF_OUT_INIT_LOW, "pwrdn", false, true, }
@@ -400,7 +419,48 @@ static int dw9714a_position_rd(struct dw9714a_info *info, unsigned *position)
 
 	return err;
 }
+#if defined(CONFIG_MACH_S9321)
+/*
+	CodeSteps=2,
+	Mode=1 (LSC)
+	StepPeriod=2
+	TSRC=8
+*/
+static int dw9714a_position_wr(struct dw9714a_info *info, s32 position)
+{
+	int err;
+	s16 data;
 
+	if (position < info->config.pos_low || position > info->config.pos_high)
+		return -EINVAL;
+	/* LSC mode */
+	err = dw9714a_i2c_wr16(info, 0xECA3);
+	if (err)
+		goto dw9714a_set_position_fail;
+	/*  TSRC */
+	err = dw9714a_i2c_wr16(info, 0xF200|(0x08<<3));
+	if (err)
+		goto dw9714a_set_position_fail;
+	/* protected on */
+	err = dw9714a_i2c_wr16(info, 0xDC51);
+	if (err)
+		goto dw9714a_set_position_fail;
+
+	data = ((position & 0x3FF) << 4) |
+		(0x2 << 2) |   /* code per step */
+		(0x2 << 0);    /* step period */
+	err = dw9714a_i2c_wr16(info, data);
+	if (err)
+		goto dw9714a_set_position_fail;
+
+	return 0;
+
+dw9714a_set_position_fail:
+	dev_err(&info->i2c_client->dev,
+		"[CAM] DW9714A: %s: set position failed\n", __func__);
+	return err;
+}
+#else
 /*
 	CodeSteps=2,
 	Mode=1 (LSC)
@@ -441,7 +501,7 @@ dw9714a_set_position_fail:
 		"[CAM] DW9714A: %s: set position failed\n", __func__);
 	return err;
 }
-
+#endif
 static void dw9714a_get_focuser_capabilities(struct dw9714a_info *info)
 {
 	memset(&info->nv_config, 0, sizeof(info->nv_config));
@@ -821,6 +881,33 @@ static int dw9714a_open(struct inode *inode, struct file *file)
 static int dw9714a_release(struct inode *inode, struct file *file)
 {
 	struct dw9714a_info *info = file->private_data;
+        u32 position;
+        dw9714a_position_rd(info, &position);
+        if (position > 450) {
+	    dw9714a_position_wr(info, 4*DW9714A_JUMP_BACK_STEP);
+	    mdelay(10);
+	    dw9714a_position_wr(info, 3*DW9714A_JUMP_BACK_STEP);
+	    mdelay(10);
+	    dw9714a_position_wr(info, 2*DW9714A_JUMP_BACK_STEP);
+	    mdelay(10);
+	    dw9714a_position_wr(info, DW9714A_JUMP_BACK_STEP);
+	    mdelay(10);
+        } else if (position > 350) {
+	    dw9714a_position_wr(info, 3*DW9714A_JUMP_BACK_STEP);
+	    mdelay(10);
+	    dw9714a_position_wr(info, 2*DW9714A_JUMP_BACK_STEP);
+	    mdelay(10);
+	    dw9714a_position_wr(info, DW9714A_JUMP_BACK_STEP);
+	    mdelay(10);
+        } else if (position > 250) {
+	    dw9714a_position_wr(info, 2*DW9714A_JUMP_BACK_STEP);
+	    mdelay(10);
+	    dw9714a_position_wr(info, DW9714A_JUMP_BACK_STEP);
+	    mdelay(10);
+        } else if (position > 150) {
+	    dw9714a_position_wr(info, DW9714A_JUMP_BACK_STEP);
+	    mdelay(10);
+        }
 	dw9714a_pm_wr(info, NVC_PWR_OFF);
 	file->private_data = NULL;
 	WARN_ON(!atomic_xchg(&info->in_use, 0));

@@ -537,6 +537,7 @@ void check(struct tegra_dsi_cmd * init_cmd,unsigned int count)
     return ;             
 }
 
+
 void rebuild_tegra_lcm(struct LCM_setting_table *init_table,struct tegra_dsi_out * pdata ,u16 init_count)
 {
 	//pr_info("Magnum dsi_otm1283a_720p_dc_out_init\n");
@@ -628,7 +629,6 @@ void tegra_dc_release_dc_out(struct tegra_dc *dc)
 	print(data, buff);				      \
 	} while (0)
 
-#ifdef DEBUG
 static void _dump_regs(struct tegra_dc *dc, void *data,
 		       void (* print)(void *data, const char *str))
 {
@@ -806,10 +806,6 @@ static void _dump_regs(struct tegra_dc *dc, void *data,
 	tegra_dc_put(dc);
 	mutex_unlock(&dc->lock);
 }
-#else
-static void _dump_regs(struct tegra_dc *dc, void *data,
-		       void (* print)(void *data, const char *str)){}
-#endif
 
 #undef DUMP_REG
 
@@ -2245,6 +2241,7 @@ static bool _tegra_dc_controller_enable(struct tegra_dc *dc)
 
 	if (dc->out->enable)
 		dc->out->enable(&dc->ndev->dev);
+		
 
 	tegra_dc_setup_clk(dc, dc->clk);
 	tegra_dc_clk_enable(dc);
@@ -2516,6 +2513,20 @@ void tegra_dc_blank(struct tegra_dc *dc)
 
 	tegra_dc_update_windows(dcwins, DC_N_WINDOWS);
 	tegra_dc_sync_windows(dcwins, DC_N_WINDOWS);
+}
+
+void tegra_dc_unblank(struct tegra_dc *dc)
+{
+	struct tegra_dc_win *dcwins[DC_N_WINDOWS];
+	unsigned i;
+
+	for (i = 0; i < DC_N_WINDOWS; i++) {
+		dcwins[i] = tegra_dc_get_window(dc,i);
+		dcwins[i]->flags |= TEGRA_WIN_FLAG_ENABLED;
+	}
+
+	tegra_dc_update_windows(dcwins, 1);
+	tegra_dc_sync_windows(dcwins, 1);
 }
 
 static void _tegra_dc_disable(struct tegra_dc *dc)
