@@ -1166,10 +1166,16 @@ err:
 	return ret;
 }
 
-static void acc_disconnect(void)
+static int acc_disconnect(void)
 {
+	if (!_acc_dev){
+		pr_err("_acc_dev has not been inited\n");
+		return -EINVAL;
+	}
+
 	/* unregister all HID devices if USB is disconnected */
 	kill_all_hid_devices(_acc_dev);
+	return 0;
 }
 
 static void acc_cleanup(void)

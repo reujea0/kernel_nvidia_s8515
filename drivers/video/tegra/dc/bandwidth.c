@@ -77,7 +77,10 @@ static void tegra_dc_set_latency_allowance(struct tegra_dc *dc,
 #endif
 	BUG_ON(w->idx >= ARRAY_SIZE(*la_id_tab));
 
+
+
 	bw = max(w->bandwidth, w->new_bandwidth);
+
 
 #if defined(CONFIG_ARCH_TEGRA_2x_SOC) || defined(CONFIG_ARCH_TEGRA_3x_SOC)
 	/* tegra_dc_get_bandwidth() treats V filter windows as double
@@ -305,11 +308,34 @@ void tegra_dc_program_bandwidth(struct tegra_dc *dc, bool use_new)
 		dc->bw_kbps = dc->new_bw_kbps;
 	}
 
+
+
 	for (i = 0; i < DC_N_WINDOWS; i++) {
 		struct tegra_dc_win *w = &dc->windows[i];
 
-		if (use_new || w->bandwidth != w->new_bandwidth)
+		#define BW_MIN	8192
+		if (w->history_bandwidth == 0)
+			w->history_bandwidth = BW_MIN;
+
+		if (use_new && w->bandwidth != w->new_bandwidth
+				&& w->new_bandwidth)
 			tegra_dc_set_latency_allowance(dc, w);
+		else if (!use_new) {
+			if (w->bandwidth || w->new_bandwidth)
+				tegra_dc_set_latency_allowance(dc, w);
+			else {
+				w->new_bandwidth = w->history_bandwidth;
+				tegra_dc_set_latency_allowance(dc, w);
+			}
+		}
+
+		if (w->new_bandwidth) {
+			w->history_bandwidth =
+				(((w->history_bandwidth << 1) +
+					w->history_bandwidth) >> 2) +
+				(w->bandwidth >> 3) + (w->new_bandwidth >> 3);
+		}
+
 		trace_program_bandwidth(dc);
 		w->bandwidth = w->new_bandwidth;
 	}

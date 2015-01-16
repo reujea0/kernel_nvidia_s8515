@@ -244,7 +244,10 @@ static int tegra_usb_phy_get_clocks(struct tegra_usb_phy *phy)
 	}
 
 	if (phy->pdata->has_hostpc) {
-		clk_set_rate(phy->emc_clk, 10000000);
+		if (get_androidboot_mode_charger())
+			clk_set_rate(phy->emc_clk, 10000000);
+		else
+			clk_set_rate(phy->emc_clk, 100000000);
 	}
 	else
 		clk_set_rate(phy->emc_clk, 300000000);

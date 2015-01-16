@@ -177,7 +177,8 @@ static struct nct1008_platform_data ceres_nct1008_pdata = {
 };
 
 struct max17048_platform_data max17048_pdata = {
-	.model_data = &tinno_s9321_2350_ssv_3_50_max17048_battery,
+//Ivan	.model_data = &tinno_s9321_2350_ssv_3_50_max17048_battery,
+	.model_data = &tinno_s9321_2350_ssv_3_40_max17048_battery,	
 //Ivan	.tz_name = "battery-temp",
 	.tz_name = "generic-adc-thermal",
 	.soc_error_max_value = 101,
@@ -987,7 +988,8 @@ static struct nvc_gpio_pdata imx179_gpio_pdata[] = {
 	{IMX179_GPIO_GP1,       CAM_CHOS_TINNO,         true, false }
 }; 
 
-
+#define RCAM_RST TEGRA_GPIO_PS0
+#define RCAM_PWDN TEGRA_GPIO_PS2
 static int pluto_imx179_power_on(struct nvc_regulator *vreg)
 {
 	int err;
@@ -999,6 +1001,9 @@ static int pluto_imx179_power_on(struct nvc_regulator *vreg)
 	gpio_set_value(CAM2_POWER_DWN_GPIO, 0);
 
 	tegra_pinmux_config_table(&mclk_enable, 1);
+
+	gpio_set_value(RCAM_RST, 0);
+	gpio_set_value(RCAM_PWDN, 1);
 
 	gpio_set_value(CAM_RSTN_TINNO, 0);
 	gpio_set_value(CAM_CHOS_TINNO, 1);
@@ -1119,6 +1124,7 @@ static struct imx179_platform_data imx179_pdata = {
 
  
 #if defined(CONFIG_VIDEO_OV16825)
+#define FCAM_PWDN TEGRA_GPIO_PS3
 
 #if 0
 #define VI_PINMUX(_pingroup, _mux, _pupd, _tri, _io, _lock, _ioreset) \
@@ -1152,6 +1158,8 @@ static int generic_ov16825_power_on(
 
 	if (unlikely(!pw || !pw->avdd || !pw->dovdd || !pw->dvdd))
 		return -EFAULT;
+	/* firstly, put front camera into power down mode */
+	gpio_set_value(FCAM_PWDN, 0);
 
 	gpio_set_value(CAM_CHOS_TINNO, 0);
 
@@ -1312,7 +1320,7 @@ static struct nvc_imager_cap ceres_ov16825_cap = {
 	#endif
 	.cap_version		= NVC_IMAGER_CAPABILITIES_VERSION2,
 };
-
+static unsigned ov16825_estates[] = {1000, 0};
 static struct ov16825_platform_data tinno_ov16825_pdata = {
 	.num		= 0,
 	.dev_name	= "camera",
@@ -1322,6 +1330,12 @@ static struct ov16825_platform_data tinno_ov16825_pdata = {
 	.power_off	= generic_ov16825_power_off,
 	.clk_name   = "mclk2",
 	.cap = &ceres_ov16825_cap,
+	.edpc_config	= {
+		.states = ov16825_estates,
+		.num_states = ARRAY_SIZE(ov16825_estates),
+		.e0_index = 1,
+		.priority = EDP_MIN_PRIO - 1,
+		},
 };
 
 static struct i2c_board_info tinno_i2c_board_info_ov16825 = {
@@ -1567,7 +1581,7 @@ static struct camera_platform_data ceres_pcl_pdatax = {
 	.modules = ceres_camera_module_infox,
 };
 
-static unsigned tinno_flash_estates[] = {4000, 1000, 0};
+static unsigned tinno_flash_estates[] = {4000, 4000, 0};
 static struct tinno_flash_platform_data tinno_flash_pdata = {
 	.dev_name = "torch",
 	.edpc_config = {
@@ -1893,7 +1907,7 @@ static void mpuirq_init(void)
 static struct thermal_trip_info skin_trips[] = {
 	{
 		.cdev_type = "skin-balanced",
-		.trip_temp = 45000,
+		.trip_temp = 70000,
 		.trip_type = THERMAL_TRIP_PASSIVE,
 		.upper = THERMAL_NO_LIMIT,
 		.lower = THERMAL_NO_LIMIT,
@@ -1901,7 +1915,7 @@ static struct thermal_trip_info skin_trips[] = {
 	},
 	{
 		.cdev_type = "tegra-shutdown",
-		.trip_temp = 70000,  //57000,
+		.trip_temp = 200000,
 		.trip_type = THERMAL_TRIP_CRITICAL,
 		.upper = THERMAL_NO_LIMIT,
 		.lower = THERMAL_NO_LIMIT,
@@ -1913,21 +1927,21 @@ static struct therm_est_subdevice skin_devs[] = {
 	{
 		.dev_data = "Tdiode",
 		.coeffs = {
-			4, -1, -1, 0,
-			0, -1, -1, -1,
-			-1, -1, 0, 0,
-			0, 0, -1, -1,
-			-1, -1, -4, -9
+			0, -1, -2, -2,
+			-1, -1, -1, -1,
+			-1, -1, 0, -1,
+			-1, -1, -1, -1,
+			-1, -2, -2, -5			
 		},
 	},
 	{
 		.dev_data = "Tboard",
 		.coeffs = {
-			14, 11, 7, 5,
-			4, 3, 3, 4,
-			2, 3, 4, 3,
-			4, 4, 5, 5,
-			5, 7, 9, 14
+			13, 10, 6, 5,
+			4, 4, 4, 3,
+			2, 3, 3, 2,
+			3, 3, 4, 5,
+			6, 8, 11, 16			
 		},
 	},
 };
@@ -1951,7 +1965,7 @@ static struct thermal_zone_params skin_tzp = {
 static struct therm_est_data skin_data = {
 	.num_trips = ARRAY_SIZE(skin_trips),
 	.trips = skin_trips,
-	.toffset = 1479,
+	.toffset = 1220,	
 	.polling_period = 1100,
 	.passive_delay = 15000,
 	.tc1 = 10,

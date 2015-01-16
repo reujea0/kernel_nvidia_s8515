@@ -18,6 +18,13 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+
+#if defined(CONFIG_MACH_S9321) && CONFIG_MACH_S9321
+	#define POWER_CONTROL_ENABLE	1
+#else
+	#define POWER_CONTROL_ENABLE	0
+#endif
+
 #define CAMERA_DEVICE_INTERNAL
 #include <linux/fs.h>
 #include <linux/platform_device.h>
@@ -32,6 +39,10 @@
 #include <linux/clk.h>
 #include <media/nvc.h>
 #include <media/nvc_torch.h>
+#include <linux/power_supply.h>
+#if defined(POWER_CONTROL_ENABLE) && POWER_CONTROL_ENABLE
+#include <linux/edpdev.h>
+#endif
 
 #include <media/camera.h>
 
@@ -67,6 +78,9 @@
 #define MAXFLASH_MODE_NONE		 0
 #define MAXFLASH_MODE_TORCH		1
 #define MAXFLASH_MODE_FLASH		2
+
+#define TINNO_TORCH_CURRENT 	10
+#define TINNO_FLASH_CURRENT 	27
 
 #define tinno_flash_flash_cap_size \
 			(sizeof(struct nvc_torch_flash_capabilities_v1) \
@@ -121,7 +135,23 @@ struct tinno_flash_info {
 	int edp_state_torch;
 	struct hrtimer timeout;
 	spinlock_t lock;
+
+#if defined(POWER_CONTROL_ENABLE) && POWER_CONTROL_ENABLE
+	struct power_supply *psy;
+	struct psy_depletion_platform_data *psy_data;
+
+	/* state machine for torch/flash control */
+	int torch_flash_low_bat_state;
+	int torch_phase;
+#endif
 };
+
+#if defined(POWER_CONTROL_ENABLE) && POWER_CONTROL_ENABLE
+#define TORCH_PHASE_ON                  1
+#define TORCH_PHASE_OFF                 0
+#define TORCH_FLASH_LOW_BAT_ON          1
+#define TORCH_FLASH_LOW_BAT_OFF         0
+#endif
 
 struct tinno_flash_info *info;
 static struct nvc_torch_lumi_level_v1
@@ -150,6 +180,111 @@ static u32 tinno_flash_flash_timer[tinno_flash_FLASH_TIMER_NUM] = {
 static u32 tinno_flash_torch_timer[tinno_flash_TORCH_TIMER_NUM] = {
 	128, 384, 640, 896, 1410, 1920, 2430, 2940,
 };
+
+#if defined(POWER_CONTROL_ENABLE) && POWER_CONTROL_ENABLE
+static int bat_read_vol(struct tinno_flash_info *info)
+{
+	union power_supply_propval pv;
+	if (info->psy) {
+		//if (! info->psy->get_property(info->psy, POWER_SUPPLY_PROP_VOLTAGE_OCV, &pv))
+		if (! info->psy->get_property(info->psy, POWER_SUPPLY_PROP_VOLTAGE_NOW, &pv))
+			return pv.intval;
+		else
+			return -1;
+	}
+	return -1;
+}
+
+static int bat_read_cap(struct tinno_flash_info *info)
+{
+	union power_supply_propval pv;
+	if (info->psy) {
+		if (! info->psy->get_property(info->psy, POWER_SUPPLY_PROP_CAPACITY, &pv))
+			return pv.intval;
+		else
+			return -1;
+	}
+	return -1;
+}
+
+static int interpolate(int x, int x1, int y1, int x2, int y2)
+{
+#if 0
+	if (x1 == x2)
+		return y1;
+	return (y2 * (x - x1) - y1 * (x - x2)) / (x2 - x1);
+#else
+	return (y1 + y2) >> 1;
+#endif
+}
+
+static int bat_read_rbat(struct tinno_flash_info *info, unsigned int capacity)
+{
+	struct psy_depletion_rbat_lut *p;
+	struct psy_depletion_rbat_lut *q;
+	int rbat = 0;
+
+	if (info->psy_data == NULL)
+		return -1;
+
+	//rbat = info->psy_data->r_const;
+	p = info->psy_data->rbat_lut;
+	if (!p)
+		return rbat;
+
+	while (p->capacity > capacity)
+		p++;
+
+	if (p == info->psy_data->rbat_lut)
+		return rbat + p->rbat;
+
+	q = p - 1;
+
+	rbat += interpolate(capacity, p->capacity, p->rbat,
+			q->capacity, q->rbat);
+	return rbat;
+}
+
+static int bat_vol_drop(int ma_100, int r)
+{
+	return ma_100 * r / 10;
+}
+
+/*
+ whether the ma_100 can be satisfied by bat
+ return 0 means safe
+ return -1 means unsafe and will lead to system shutdown
+*/
+static int bat_is_safe(struct tinno_flash_info *info, int ma_100)
+{
+	int vol = 0;
+	int cap = 0;
+	int rbat = 0;
+	int v_drop = 0;
+
+	if (info->psy == NULL)
+		return 0;
+
+	vol = bat_read_vol(info);
+	if (vol < 0)
+		return 0;
+
+	cap = bat_read_cap(info);
+	if (cap < 0)
+		return 0;
+
+	rbat = bat_read_rbat(info, cap);
+	if (rbat < 0)
+		return 0;
+
+	v_drop = bat_vol_drop(ma_100, rbat);
+
+	if (vol - v_drop > 3000000)
+		return 0;
+	else
+		return -1;
+}
+#endif
 
 static void tinno_flash_set_flash(struct tinno_flash_info *info, int on);
 static void tinno_flash_set_torch(struct tinno_flash_info *info, int on);
@@ -664,6 +799,119 @@ static int tinno_flash_set_leds(struct tinno_flash_info *info,
 	return 0;
 }
 
+#if defined(POWER_CONTROL_ENABLE) && POWER_CONTROL_ENABLE
+/* new version for low bat control */
+static int tinno_flash_edp_req(struct tinno_flash_info *info,
+		u8 mask, u8 *curr1, u8 *curr2)
+{
+	unsigned approved;
+	unsigned new_state;
+	int ret = 0;
+
+	if (!info->edpc)
+		return 0;
+
+	new_state = info->edpc->num_states - 1;
+
+	dev_dbg(info->dev, "%s: %d curr1 = %02x curr2 = %02x\n",
+		__func__, mask, *curr1, *curr2);
+
+	if (info->op_mode == MAXFLASH_MODE_FLASH && *curr1 && mask) {
+		if (info->edp_state_flash >= 0) {
+			new_state = info->edp_state_flash;
+		} else
+			new_state = 0;
+	} else if (info->op_mode == MAXFLASH_MODE_TORCH && *curr1 && mask) {
+		if (info->edp_state_torch >= 0) {
+			new_state = info->edp_state_torch;
+		} else
+			new_state = 1;
+	}
+
+	BUG_ON(new_state >= info->edpc->num_states);
+
+	dev_dbg(info->dev, "edp req: %d\n", new_state);
+	ret = edp_update_client_request(info->edpc, new_state, &approved);
+	if (ret || approved > new_state) {
+		printk ("%s edp requirement not satisfied\n", __func__);
+		info->edp_state = info->edpc->num_states - 1;
+		*curr1 = 0;
+	}
+	else
+		info->edp_state = approved;
+
+	return 0;
+}
+
+static int
+tinno_torch_check_lowbat(struct tinno_flash_info *info,
+		u8 mask, u8 *curr1, u8 *curr2)
+{
+	tinno_flash_edp_req(info, mask, curr1, curr2);
+
+	if (bat_is_safe(info, TINNO_FLASH_CURRENT))
+		*curr1 = 0;
+
+	if (*curr1 == 0)
+		printk ("%s low bat condition\n", __func__);
+	return 0;
+}
+
+static int
+tinno_flash_edp_set_leds(struct tinno_flash_info *info,
+		u8 mask, u8 curr1, u8 curr2)
+{
+	if (curr1 == 0)
+		info->torch_phase = TORCH_PHASE_OFF;
+	else {
+		if (info->torch_phase == TORCH_PHASE_ON) {
+			if (info->torch_flash_low_bat_state ==
+				TORCH_FLASH_LOW_BAT_OFF)
+					curr1 = 0;
+		}
+		else {
+			tinno_torch_check_lowbat(info,
+				mask, &curr1, &curr2);
+		}
+	}
+
+	tinno_flash_set_leds(info, mask, curr1, curr2);
+	if (info->op_mode == MAXFLASH_MODE_NONE)
+		tinno_flash_edp_lowest(info);
+
+	return 0;
+}
+
+static int
+tinno_torch_edp_set_leds(struct tinno_flash_info *info,
+		u8 mask, u8 curr1, u8 curr2)
+{
+	if (curr1) {
+		info->torch_flash_low_bat_state =
+			TORCH_FLASH_LOW_BAT_ON;
+		info->torch_phase = TORCH_PHASE_ON;
+
+		tinno_torch_check_lowbat(info, mask, &curr1, &curr2);
+
+		if (curr1 == 0)
+			info->torch_flash_low_bat_state =
+				TORCH_FLASH_LOW_BAT_OFF;
+	}
+
+	if (curr1 > 0)
+		tinno_flash_set_torch(info,  1);
+	else
+		tinno_flash_set_torch(info,  0);
+
+	info->torch_level = curr1;
+
+	if (info->op_mode == MAXFLASH_MODE_NONE)
+		tinno_flash_edp_lowest(info);
+
+	return 0;
+}
+#else
+/* old version */
 static int tinno_flash_edp_req(struct tinno_flash_info *info,
 		u8 mask, u8 *curr1, u8 *curr2)
 {
@@ -721,7 +969,6 @@ static int tinno_flash_edp_set_leds(struct tinno_flash_info *info,
 	err = tinno_flash_edp_req(info, mask, &curr1, &curr2);
 	if (err)
 		goto edp_set_leds_end;
-
 	err = tinno_flash_set_leds(info, mask, curr1, curr2);
 	if (!err && info->op_mode == MAXFLASH_MODE_NONE)
 		tinno_flash_edp_lowest(info);
@@ -753,6 +1000,7 @@ edp_set_leds_end:
 	return err;
 }
 
+#endif
 static int tinno_flash_strobe(struct tinno_flash_info *info, int t_on)
 {
 	return 0;
@@ -773,7 +1021,7 @@ static ssize_t torch_value_store(struct device_driver *ddri, const char *buf, si
 			printk("[sgm3780]: Invalid values\n");
 			return -EINVAL;
 	}
-        turnoff_torch(torch_status);
+	turnoff_torch(torch_status);
 	return count;
 }
 static DRIVER_ATTR(value, 0644,torch_value_show, torch_value_store);
@@ -785,17 +1033,17 @@ static void tinno_flash_set_torch(struct tinno_flash_info *info, int on)
 		gpio_set_value(info->gpio_en_torch, on ? 1 : 0);
 	}
 /* wangjian add  for torch app*/
-        if((1==torch_status)&&(0==on)){
-            torch_status = on;
-            printk("[sgm3780] reset torch_status to off\n");
-        }
+	if((1==torch_status)&&(0==on)){
+		torch_status = on;
+		printk("[sgm3780] reset torch_status to off\n");
+	}
 /* wangjian add  for torch app*/
 }
 
 void turnoff_torch(int on)
 {
-      if(info)
-	tinno_flash_set_torch(info, on);
+	if(info)
+		tinno_flash_set_torch(info, on);
 }
 static void tinno_flash_set_flash(struct tinno_flash_info *info, int on)
 {
@@ -834,7 +1082,6 @@ static int tinno_flash_set_param(struct tinno_flash_info *info, long arg)
 		curr2 = led_levels.levels[1];
 		err = tinno_torch_edp_set_leds(info,
 			led_levels.ledmask, curr1, curr2);
-
 		break;
 	case NVC_PARAM_FLASH_PIN_STATE:
 		if (copy_from_user(&val, (const void __user *)params.p_value,
@@ -935,6 +1182,10 @@ static int tinno_flash_get_param(struct tinno_flash_info *info, long arg)
 		pinstate.values &= pinstate.mask;
 		dev_dbg(info->dev, "%s FLASH_PIN_STATE: %x & %x\n",
 				__func__, pinstate.mask, pinstate.values);
+
+		if (info->flash_level == 0)
+			pinstate.values = 0;
+
 		data_ptr = &pinstate;
 		data_size = sizeof(pinstate);
 		break;
@@ -1095,12 +1346,12 @@ static int tinno_flash_probe(struct platform_device *dev)
 		goto free_mem;
 	}
 // wangjian add attr for torch app
-        printk("[soc_driver]:driver_create_file_call_state \n");
+	printk("[soc_driver]:driver_create_file_call_state \n");
 	err = driver_create_file(&tinno_flash_driver.driver,&driver_attr_value);
-    	if (err) {
-        	printk( " failed to register tinno_flash_driver attributes\n");
-        	err = 0;
-        }
+	if (err) {
+		printk( " failed to register tinno_flash_driver attributes\n");
+		err = 0;
+	}
 // wangjian add attr for torch app end
 
 	info->gpio_en_torch = info->gpio_en_flash = -1;
@@ -1130,6 +1381,11 @@ static int tinno_flash_probe(struct platform_device *dev)
 
 	hrtimer_init(&info->timeout, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	info->timeout.function = tinno_flash_timeout_event;
+
+#if defined(POWER_CONTROL_ENABLE) && POWER_CONTROL_ENABLE
+	info->psy = power_supply_get_by_name("battery");
+	info->psy_data = psy_get_pdata();
+#endif
 	return 0;
 
 free_misc_dev:

@@ -352,6 +352,9 @@ static int inv_switch_engine(struct inv_mpu_state *st, bool en, u32 mask)
 	if ((BIT_PWR_ACCEL_STBY == mask) && en)
 		msleep(REG_UP_TIME);
 
+	inv_i2c_read(st, reg->pwr_mgmt_1, 1, &mgmt_1);
+	inv_i2c_read(st, reg->pwr_mgmt_2, 1, &data);
+
 	return 0;
 }
 

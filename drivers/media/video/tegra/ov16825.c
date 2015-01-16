@@ -21,6 +21,8 @@
 #include <linux/clk.h>
 #include <linux/module.h>
 #include <media/ov16825.h>
+#include <linux/regmap.h>
+#include <linux/edp.h>
 
 #define OV16825_ID							0x0168
 #define OV16825_SENSOR_TYPE					NVC_IMAGER_TYPE_RAW
@@ -49,13 +51,41 @@ static struct nvc_gpio_init ov18625_gpio[] = {
 	{ OV16825_GPIO_TYPE_PWRDN, GPIOF_OUT_INIT_HIGH, "pwrdn", false, true, },
 };
 
+#define OV16825_EEPROM_BLOCK1_FUSEID_LEN	9
+#define OV16825_EEPROM_BLOCK1_FLAG_INVALID	0
+struct ov16825_eeprom_block1
+{
+	u8 fuseid[OV16825_EEPROM_BLOCK1_FUSEID_LEN];
+	u8 flag;
+};
+
+#define OV16825_EEPROM_SIZE	256
+#define OV16825_EEPROM_COUNT 6
+struct ov16825_eeprom_device {
+	struct i2c_client *i2c_client;
+	struct i2c_adapter *adap;
+	struct i2c_board_info brd;
+	struct regmap *regmap;
+	int block_nr;
+	u8 buf[OV16825_EEPROM_SIZE];
+	int size;
+};
+
+static int eeprom_dev_addr[OV16825_EEPROM_COUNT] = {
+	0xa0 >> 1,
+	0xa4 >> 1,
+	0xa6 >> 1,
+	0xa8 >> 1,
+	0xaa >> 1,
+	0xac >> 1,
+};
+
 struct ov16825_info {
 	atomic_t in_use;
 	struct i2c_client *i2c_client;
 	struct ov16825_platform_data *pdata;
 	struct nvc_imager_cap *cap;
 	struct miscdevice miscdev;
-	struct list_head list;
 	int pwr_api;
 	int pwr_dev;
 	struct nvc_gpio gpio[ARRAY_SIZE(ov18625_gpio)];
@@ -72,6 +102,10 @@ struct ov16825_info {
 	u8 bin_en;
 	struct clk *mclk;
 	struct nvc_fuseid fuse_id;
+	struct ov16825_eeprom_device
+		eeprom[OV16825_EEPROM_COUNT];
+	struct edp_client *edpc;
+	unsigned edp_state;
 };
 
 struct ov16825_reg {
@@ -138,10 +172,10 @@ static struct nvc_imager_static_nvc ov16825_dflt_sdata = {
 	.res_chg_wait_time	= OV16825_RES_CHG_WAIT_TIME_MS,
 };
 
-static LIST_HEAD(ov16825_info_list);
-static DEFINE_SPINLOCK(ov16825_spinlock);
-
-
+static void ov16825_read_fuseid_test(
+	struct ov16825_info *info,
+	int *len,
+	unsigned char *buf);
 
 static struct ov16825_reg tp_none_seq[] = {
 	{0x5040, 0x00},
@@ -160,11 +194,12 @@ static struct ov16825_reg *test_patterns[] = {
 
 
 static struct ov16825_reg ov16825_1920x1080_i2c[] = {
-	{0x0103, 0x01},
-	{OV16825_TABLE_WAIT_MS, 20},
+	//{0x0103, 0x01},
+	//{OV16825_TABLE_WAIT_MS, 20},
 	{0x0300, 0x02},
-	{0x0302, 0x64},
-	{0x0305, 0x01},
+	//{0x0302, 0x64},
+	{0x0302, 0x40},
+	{0x0305, 0x01},//0x04
 	{0x0306, 0x00},
 	{0x030b, 0x02},
 	{0x030c, 0x14},
@@ -187,7 +222,7 @@ static struct ov16825_reg ov16825_1920x1080_i2c[] = {
 	{0x3611, 0x59},
 	{0x3612, 0x40},
 	{0x3613, 0x89},
-	{0x3615, 0x44},
+	{0x3615, 0x44},//0x54
 	{0x3617, 0x00},
 	{0x3618, 0x20},
 	{0x3619, 0x00},
@@ -361,7 +396,7 @@ static struct ov16825_reg ov16825_1920x1080_i2c[] = {
 	{0x4002, 0x02},
 	{0x4003, 0x04},
 	{0x4800, 0x24},
-	{0x4837, 0x14},
+	{0x4837, 0x1f},//0x14
 	{0x3501, 0x8a},
 	{0x3502, 0x00},
 	{0x3508, 0x08},
@@ -371,12 +406,12 @@ static struct ov16825_reg ov16825_1920x1080_i2c[] = {
 	{OV16825_TABLE_END, 0x0000},
 };
 
-#if 0
 static struct ov16825_reg ov16825_2304x1728_i2c[] = {
-	{0x0103, 0x01},
-	{OV16825_TABLE_WAIT_MS, 20},
+	//{0x0103, 0x01},
+	//{OV16825_TABLE_WAIT_MS, 20},
 	{0x0300, 0x02},
-	{0x0302, 0x64},
+	//{0x0302, 0x50},
+	{0x0302, 0x40},//0x32
 	{0x0305, 0x01},
 	{0x0306, 0x00},
 	{0x030b, 0x02},
@@ -575,12 +610,13 @@ static struct ov16825_reg ov16825_2304x1728_i2c[] = {
 	{0x4002, 0x02},
 	{0x4003, 0x04},
 	{0x4800, 0x24},
-	{0x4837, 0x14},
+	//{0x4837, 0x19},
+	{0x4837, 0x1f},
 	{0x3501, 0x6d},
 	{0x3502, 0x60},
 
 	/* test pattern */
-	{0x5040, 0x80},
+	/* {0x5040, 0x80}, */
 
 	{0x3508, 0x08},
 	{0x3509, 0xff},
@@ -589,10 +625,10 @@ static struct ov16825_reg ov16825_2304x1728_i2c[] = {
 	{OV16825_TABLE_WAIT_MS, 30},
 	{OV16825_TABLE_END, 0x0000},
 };
-#else
+
 static struct ov16825_reg ov16825_2176x1632_i2c[] = {
-	{0x0103, 0x01},
-	{OV16825_TABLE_WAIT_MS, 20},
+	//{0x0103, 0x01},
+	//{OV16825_TABLE_WAIT_MS, 20},
 	{0x0300, 0x02},
 	{0x0302, 0x64},
 	{0x0305, 0x01},
@@ -803,12 +839,224 @@ static struct ov16825_reg ov16825_2176x1632_i2c[] = {
 	{OV16825_TABLE_WAIT_MS, 30},
 	{OV16825_TABLE_END, 0x0000},
 };
-#endif
+
+static struct ov16825_reg ov16825_3840x2160_i2c[] = {
+	//{0x0103, 0x01},
+	//{OV16825_TABLE_WAIT_MS, 20},
+	{0x0300, 0x02},
+	{0x0302, 0x64},
+	{0x0305, 0x01},
+	{0x0306, 0x00},
+	{0x030b, 0x02},
+	{0x030c, 0x14},
+	{0x030e, 0x00},
+	{0x0313, 0x02},
+	{0x0314, 0x14},
+	{0x031f, 0x00},
+	{0x3022, 0x01},
+	{0x3032, 0x80},
+	{0x3601, 0xf8},
+	{0x3602, 0x00},
+	{0x3605, 0x50},
+	{0x3606, 0x00},
+	{0x3607, 0x2b},
+	{0x3608, 0x16},
+	{0x3609, 0x00},
+	{0x360e, 0x99},
+	{0x360f, 0x75},
+	{0x3610, 0x69},
+	{0x3611, 0x59},
+	{0x3612, 0x40},
+	{0x3613, 0x89},
+	{0x3615, 0x54},
+	{0x3617, 0x00},
+	{0x3618, 0x20},
+	{0x3619, 0x00},
+	{0x361a, 0x10},
+	{0x361c, 0x10},
+	{0x361d, 0x00},
+	{0x361e, 0x00},
+	{0x3640, 0x15},
+	{0x3641, 0x54},
+	{0x3642, 0x63},
+	{0x3643, 0x32},
+	{0x3644, 0x03},
+	{0x3645, 0x04},
+	{0x3646, 0x85},
+	{0x364a, 0x07},
+	{0x3707, 0x08},
+	{0x3718, 0x75},
+	{0x371a, 0x55},
+	{0x371c, 0x55},
+	{0x3733, 0x80},
+	{0x3760, 0x00},
+	{0x3761, 0x30},
+	{0x3762, 0x00},
+	{0x3763, 0xc0},
+	{0x3764, 0x03},
+	{0x3765, 0x00},
+	{0x3823, 0x08},
+	{0x3827, 0x02},
+	{0x3828, 0x00},
+	{0x3832, 0x00},
+	{0x3833, 0x00},
+	{0x3834, 0x00},
+	{0x3d85, 0x17},
+	{0x3d8c, 0x70},
+	{0x3d8d, 0xa0},
+	{0x3f00, 0x02},
+	{0x4001, 0x83},
+	{0x400e, 0x00},
+	{0x4011, 0x00},
+	{0x4012, 0x00},
+	{0x4200, 0x08},
+	{0x4302, 0x7f},
+	{0x4303, 0xff},
+	{0x4304, 0x00},
+	{0x4305, 0x00},
+	{0x4501, 0x30},
+	{0x4603, 0x20},
+	{0x4b00, 0x22},
+	{0x4903, 0x00},
+	{0x5000, 0x7f},
+	{0x5001, 0x01},
+	{0x5004, 0x00},
+	{0x5013, 0x20},
+	{0x5051, 0x00},
+	{0x5500, 0x01},
+	{0x5501, 0x00},
+	{0x5502, 0x07},
+	{0x5503, 0xff},
+	{0x5505, 0x6c},
+	{0x5509, 0x02},
+	{0x5780, 0xfc},
+	{0x5781, 0xff},
+	{0x5787, 0x40},
+	{0x5788, 0x08},
+	{0x578a, 0x02},
+	{0x578b, 0x01},
+	{0x578c, 0x01},
+	{0x578e, 0x02},
+	{0x578f, 0x01},
+	{0x5790, 0x01},
+	{0x5792, 0x00},
+	{0x5980, 0x00},
+	{0x5981, 0x21},
+	{0x5982, 0x00},
+	{0x5983, 0x00},
+	{0x5984, 0x00},
+	{0x5985, 0x00},
+	{0x5986, 0x00},
+	{0x5987, 0x00},
+	{0x5988, 0x00},
+	{0x3201, 0x15},
+	{0x3202, 0x2a},
+	{0x0305, 0x01},
+	{0x030e, 0x01},
+	{0x3018, 0x7a},
+	{0x3031, 0x0a},
+	{0x3603, 0x00},
+	{0x3604, 0x00},
+	{0x360a, 0x00},
+	{0x360b, 0x02},
+	{0x360c, 0x12},
+	{0x360d, 0x00},
+	{0x3614, 0x77},
+	{0x3616, 0x30},
+	{0x3631, 0x60},
+	{0x3700, 0x30},
+	{0x3701, 0x08},
+	{0x3702, 0x11},
+	{0x3703, 0x20},
+	{0x3704, 0x08},
+	{0x3705, 0x00},
+	{0x3706, 0x84},
+	{0x3708, 0x20},
+	{0x3709, 0x3c},
+	{0x370a, 0x01},
+	{0x370b, 0x5d},
+	{0x370c, 0x03},
+	{0x370e, 0x20},
+	{0x370f, 0x05},
+	{0x3710, 0x20},
+	{0x3711, 0x20},
+	{0x3714, 0x31},
+	{0x3719, 0x13},
+	{0x371b, 0x03},
+	{0x371d, 0x03},
+	{0x371e, 0x09},
+	{0x371f, 0x17},
+	{0x3720, 0x0b},
+	{0x3721, 0x18},
+	{0x3722, 0x0b},
+	{0x3723, 0x18},
+	{0x3724, 0x04},
+	{0x3725, 0x04},
+	{0x3726, 0x02},
+	{0x3727, 0x02},
+	{0x3728, 0x02},
+	{0x3729, 0x02},
+	{0x372a, 0x25},
+	{0x372b, 0x65},
+	{0x372c, 0x55},
+	{0x372d, 0x65},
+	{0x372e, 0x53},
+	{0x372f, 0x33},
+	{0x3730, 0x33},
+	{0x3731, 0x33},
+	{0x3732, 0x03},
+	{0x3734, 0x10},
+	{0x3739, 0x03},
+	{0x373a, 0x20},
+	{0x373b, 0x0c},
+	{0x373c, 0x1c},
+	{0x373e, 0x0b},
+	{0x373f, 0x80},
+	{0x3800, 0x01},
+	{0x3801, 0xa0},
+	{0x3802, 0x02},
+	{0x3803, 0x96},
+	{0x3804, 0x10},
+	{0x3805, 0xbf},
+	{0x3806, 0x0b},
+	{0x3807, 0x0b},
+	{0x3808, 0x0f},
+	{0x3809, 0x00},
+	{0x380a, 0x08},
+	{0x380b, 0x70},
+	{0x380c, 0x04},
+	{0x380d, 0xca},
+	{0x380e, 0x08},
+	{0x380f, 0x92},
+	{0x3811, 0x0f},
+	{0x3813, 0x02},
+	{0x3814, 0x01},
+	{0x3815, 0x01},
+	{0x3820, 0x00},
+	{0x3821, 0x06},
+	{0x3829, 0x00},
+	{0x382a, 0x01},
+	{0x382b, 0x01},
+	{0x3830, 0x08},
+	{0x3f08, 0x20},
+	{0x4002, 0x04},
+	{0x4003, 0x08},
+	{0x4800, 0x24},
+	{0x4837, 0x14},
+	{0x3501, 0x88},
+	{0x3502, 0xe0},
+	{0x3508, 0x04},
+	{0x3509, 0xff},
+	{0x3638, 0x00},
+	{0x0100, 0x01},
+	{OV16825_TABLE_WAIT_MS, 30},
+	{OV16825_TABLE_END, 0x0000},
+};
 
 
 static struct ov16825_reg ov16825_4608x3456_i2c[] = {
-	{0x0103, 0x01},
-	{OV16825_TABLE_WAIT_MS, 20},
+	//{0x0103, 0x01},
+	//{OV16825_TABLE_WAIT_MS, 20},
 	{0x0300, 0x02},
 	{0x0302, 0x64},
 	{0x0305, 0x01},
@@ -1036,11 +1284,11 @@ static struct ov16825_mode_data ov16825_1920x1080 = {
 		.region_start_y		= 0,
 		.x_scale		= 1,
 		.y_scale		= 1,
-		.bracket_caps		= 0,
-		.flush_count		= 0,
-		.init_intra_frame_skip	= 0,
-		.ss_intra_frame_skip	= 0,
-		.ss_frame_number	= 0,
+		.bracket_caps		= 1,
+		.flush_count		= 1,
+		.init_intra_frame_skip	= 1,
+		.ss_intra_frame_skip	= 2,
+		.ss_frame_number	= 3,
 		.coarse_time		= 0x974, /* reg 0x3500,0x3501,0x3502 */
 		.max_coarse_diff	= 4,
 		.min_exposure_course	= 2,
@@ -1051,7 +1299,7 @@ static struct ov16825_mode_data ov16825_1920x1080 = {
 		.min_frame_length	= 0x8a4,
 		.max_frame_length	= 0x7ff8,
 		.min_gain		= 1000, /* / _INT2FLOAT_DIVISOR */
-		.max_gain		= 15937, /* / _INT2FLOAT_DIVISOR */
+		.max_gain		= 9000, /* / _INT2FLOAT_DIVISOR */
 		.inherent_gain		= 1000, /* / _INT2FLOAT_DIVISOR */
 		.inherent_gain_bin_en	= 1000, /* / _INT2FLOAT_DIVISOR */
 		.support_bin_control	= 0,
@@ -1080,11 +1328,11 @@ static struct ov16825_mode_data ov16825_2176x1632 = {
 		.region_start_y		= 0,
 		.x_scale		= 1,
 		.y_scale		= 1,
-		.bracket_caps		= 0,
-		.flush_count		= 0,
-		.init_intra_frame_skip	= 0,
-		.ss_intra_frame_skip	= 0,
-		.ss_frame_number	= 0,
+		.bracket_caps		= 1,
+		.flush_count		= 1,
+		.init_intra_frame_skip	= 1,
+		.ss_intra_frame_skip	= 2,
+		.ss_frame_number	= 3,
 		.coarse_time		= 0x974, /* reg 0x3500,0x3501,0x3502 */
 		.max_coarse_diff	= 4,
 		.min_exposure_course	= 2,
@@ -1095,7 +1343,7 @@ static struct ov16825_mode_data ov16825_2176x1632 = {
 		.min_frame_length	= 0x6da,
 		.max_frame_length	= 0x7ff8,
 		.min_gain		= 1000, /* / _INT2FLOAT_DIVISOR */
-		.max_gain		= 15937, /* / _INT2FLOAT_DIVISOR */
+		.max_gain		= 9000, /* / _INT2FLOAT_DIVISOR */
 		.inherent_gain		= 1000, /* / _INT2FLOAT_DIVISOR */
 		.inherent_gain_bin_en	= 1000, /* / _INT2FLOAT_DIVISOR */
 		.support_bin_control	= 0,
@@ -1105,6 +1353,94 @@ static struct ov16825_mode_data ov16825_2176x1632 = {
 		.mode_sw_wait_frames	= 1500, /* / _INT2FLOAT_DIVISOR */
 	},
 	.p_mode_i2c			= ov16825_2176x1632_i2c,
+};
+
+static struct ov16825_mode_data ov16825_2304x1728 = {
+	.sensor_mode = {
+		.res_x			= 2304,
+		.res_y			= 1728,
+		.active_start_x		= 0,
+		.active_stary_y		= 0,
+		.peak_frame_rate	= 30000, /* / _INT2FLOAT_DIVISOR */
+		.pixel_aspect_ratio	= 1000, /* / _INT2FLOAT_DIVISOR */
+		.pll_multiplier		= 8500, /* / _INT2FLOAT_DIVISOR */
+		.crop_mode		= NVC_IMAGER_CROPMODE_NONE,
+	},
+	.sensor_dnvc = {
+		.api_version		= NVC_IMAGER_API_DYNAMIC_VER,
+		.region_start_x		= 0,
+		.region_start_y		= 0,
+		.x_scale		= 1,
+		.y_scale		= 1,
+		.bracket_caps		= 1,
+		.flush_count		= 1,
+		.init_intra_frame_skip	= 1,
+		.ss_intra_frame_skip	= 2,
+		.ss_frame_number	= 3,
+		.coarse_time		= 0x974, /* reg 0x3500,0x3501,0x3502 */
+		.max_coarse_diff	= 4,
+		.min_exposure_course	= 2,
+		.max_exposure_course	= 0x7ff0,
+		.diff_integration_time	= 0, /* / _INT2FLOAT_DIVISOR */
+		.line_length		= 0x5c9, /* reg 0x380c,0x380d */
+		.frame_length		= 0x708, /* reg 0x380e,0x380f */
+		.min_frame_length	= 0x708,
+		.max_frame_length	= 0x7ff8,
+		.min_gain		= 1000, /* / _INT2FLOAT_DIVISOR */
+		.max_gain		= 9000, /* / _INT2FLOAT_DIVISOR */
+		.inherent_gain		= 1000, /* / _INT2FLOAT_DIVISOR */
+		.inherent_gain_bin_en	= 1000, /* / _INT2FLOAT_DIVISOR */
+		.support_bin_control	= 0,
+		.support_fast_mode	= 0,
+		.pll_mult		= 0x32,
+		.pll_div		= 0x06,
+		.mode_sw_wait_frames	= 1500, /* / _INT2FLOAT_DIVISOR */
+	},
+	.p_mode_i2c			= ov16825_2304x1728_i2c,
+};
+
+static struct ov16825_mode_data ov16825_3840x2160 = {
+	.sensor_mode = {
+		.res_x			= 3840,
+		.res_y			= 2160,
+		.active_start_x		= 0,
+		.active_stary_y		= 0,
+		.peak_frame_rate	= 30000, /* / _INT2FLOAT_DIVISOR */
+		.pixel_aspect_ratio	= 1000, /* / _INT2FLOAT_DIVISOR */
+		.pll_multiplier		= 13000, /* / _INT2FLOAT_DIVISOR */
+		.crop_mode		= NVC_IMAGER_CROPMODE_NONE,
+	},
+	.sensor_dnvc = {
+		.api_version		= NVC_IMAGER_API_DYNAMIC_VER,
+		.region_start_x		= 0,
+		.region_start_y		= 0,
+		.x_scale		= 1,
+		.y_scale		= 1,
+		.bracket_caps		= 1,
+		.flush_count		= 1,
+		.init_intra_frame_skip	= 1,
+		.ss_intra_frame_skip	= 2,
+		.ss_frame_number	= 3,
+		.coarse_time		= 0x88e, /* reg 0x3500,0x3501,0x3502 */
+		.max_coarse_diff	= 4,
+		.min_exposure_course	= 2,
+		.max_exposure_course	= 0x7ff0,
+		.diff_integration_time	= 0, /* / _INT2FLOAT_DIVISOR */
+		.line_length		= 0x04ca, /* reg 0x380c,0x380d */
+		.frame_length		= 0x0892, /* reg 0x380e,0x380f */
+		.min_frame_length	= 0x0892,
+		.max_frame_length	= 0x7ff8,
+		.min_gain		= 1000, /* / _INT2FLOAT_DIVISOR */
+		.max_gain		= 9000, /* / _INT2FLOAT_DIVISOR */
+		.inherent_gain		= 1000, /* / _INT2FLOAT_DIVISOR */
+		.inherent_gain_bin_en	= 1000, /* / _INT2FLOAT_DIVISOR */
+		.support_bin_control	= 0,
+		.support_fast_mode	= 0,
+		.pll_mult		= 0x32,
+		.pll_div		= 0x06,
+		.mode_sw_wait_frames	= 1500, /* / _INT2FLOAT_DIVISOR */
+	},
+	.p_mode_i2c			= ov16825_3840x2160_i2c,
 };
 
 static struct ov16825_mode_data ov16825_4608x3456 = {
@@ -1124,11 +1460,11 @@ static struct ov16825_mode_data ov16825_4608x3456 = {
 		.region_start_y		= 0,
 		.x_scale		= 1,
 		.y_scale		= 1,
-		.bracket_caps		= 0,
-		.flush_count		= 0,
-		.init_intra_frame_skip	= 0,
-		.ss_intra_frame_skip	= 0,
-		.ss_frame_number	= 0,
+		.bracket_caps		= 1,
+		.flush_count		= 1,
+		.init_intra_frame_skip	= 1,
+		.ss_intra_frame_skip	= 2,
+		.ss_frame_number	= 3,
 		.coarse_time		= 0xbd4, /* reg 0x3500,0x3501,0x3502 */
 		.max_coarse_diff	= 4,
 		.min_exposure_course	= 2,
@@ -1139,7 +1475,7 @@ static struct ov16825_mode_data ov16825_4608x3456 = {
 		.min_frame_length	= 0xda2,
 		.max_frame_length	= 0x7ff8,
 		.min_gain		= 1000, /* / _INT2FLOAT_DIVISOR */
-		.max_gain		= 15937, /* / _INT2FLOAT_DIVISOR */
+		.max_gain		= 9000, /* / _INT2FLOAT_DIVISOR */
 		.inherent_gain		= 1000, /* / _INT2FLOAT_DIVISOR */
 		.inherent_gain_bin_en	= 1000, /* / _INT2FLOAT_DIVISOR */
 		.support_bin_control	= 0,
@@ -1155,15 +1491,104 @@ static struct ov16825_mode_data ov16825_4608x3456 = {
 void *unused_p = &ov16825_4608x3456;
 void *unused_p_2 = &ov16825_2176x1632;
 void *unused_p_1 = &ov16825_1920x1080;
+void *unused_p_3 = &ov16825_3840x2160;
+void *unused_p_4 = &ov16825_2304x1728;
 static struct ov16825_mode_data *ov16825_mode_table[] = {
 #if 1
 	[0] = &ov16825_4608x3456,
-	[1] = &ov16825_2176x1632,
-	[2] = &ov16825_1920x1080,
+	[1] = &ov16825_3840x2160,
+	[2] = &ov16825_2304x1728,
+	[3] = &ov16825_1920x1080,
 #else
-	[0] = &ov16825_4608x3456,
+	[0] = &ov16825_3840x2160,
 #endif
 };
+
+static void ov16825_edp_callback(unsigned int new_state, void *priv_data)
+{
+}
+
+static void ov16825_edp_lowest(struct ov16825_info *info)
+{
+	if (!info->edpc)
+		return;
+
+	info->edp_state = info->edpc->num_states - 1;
+	dev_dbg(&info->i2c_client->dev, "%s %d\n", __func__, info->edp_state);
+	if (edp_update_client_request(info->edpc, info->edp_state, NULL)) {
+		dev_err(&info->i2c_client->dev, "THIS IS NOT LIKELY HAPPEN!\n");
+		dev_err(&info->i2c_client->dev,
+			"UNABLE TO SET LOWEST EDP STATE!\n");
+	}
+}
+
+static void ov16825_edp_register(struct ov16825_info *info)
+{
+	struct edp_manager *edp_manager;
+	struct edp_client *edpc = &info->pdata->edpc_config;
+	int ret;
+
+	info->edpc = NULL;
+	if (!edpc->num_states) {
+		dev_warn(&info->i2c_client->dev,
+			"%s: NO edp states defined.\n", __func__);
+		return;
+	}
+
+	strncpy(edpc->name, "ov16825", EDP_NAME_LEN - 1);
+	edpc->name[EDP_NAME_LEN - 1] = 0;
+	edpc->private_data = info;
+	edpc->throttle = ov16825_edp_callback;
+	edpc->notify_promotion = ov16825_edp_callback;
+
+	dev_dbg(&info->i2c_client->dev, "%s: %s, e0 = %d, p %d\n",
+		__func__, edpc->name, edpc->e0_index, edpc->priority);
+	for (ret = 0; ret < edpc->num_states; ret++)
+		dev_dbg(&info->i2c_client->dev, "e%d = %d mA",
+			ret - edpc->e0_index, edpc->states[ret]);
+
+	edp_manager = edp_get_manager("battery");
+	if (!edp_manager) {
+		dev_err(&info->i2c_client->dev,
+			"unable to get edp manager: battery\n");
+		return;
+	}
+
+	ret = edp_register_client(edp_manager, edpc);
+	if (ret) {
+		dev_err(&info->i2c_client->dev,
+			"unable to register edp client\n");
+		return;
+	}
+
+	info->edpc = edpc;
+	/* set to lowest state at init */
+	ov16825_edp_lowest(info);
+}
+
+static int ov16825_edp_req(struct ov16825_info *info, unsigned new_state)
+{
+	unsigned approved;
+	int ret = 0;
+
+	if (!info->edpc)
+		return 0;
+
+	dev_dbg(&info->i2c_client->dev, "%s %d\n", __func__, new_state);
+	ret = edp_update_client_request(info->edpc, new_state, &approved);
+	if (ret) {
+		dev_err(&info->i2c_client->dev, "E state transition failed\n");
+		return ret;
+	}
+
+	if (approved > new_state) {
+		dev_err(&info->i2c_client->dev, "EDP no enough current\n");
+		return -ENODEV;
+	}
+
+	info->edp_state = approved;
+	return 0;
+}
 
 static int ov16825_i2c_rd8(struct ov16825_info *info, u16 reg, u8 *val)
 {
@@ -1915,6 +2340,8 @@ static int ov16825_pm_wr(struct ov16825_info *info, int pwr)
 	case NVC_PWR_COMM:
 	case NVC_PWR_ON:
 		err = ov16825_power_on(info, false);
+		ov16825_i2c_wr8(info, 0x0103, 0x01);
+		mdelay(20);
 		break;
 
 	default:
@@ -2157,14 +2584,14 @@ static int ov16825_mode_wr(struct ov16825_info *info,
 	if (err < 0)
 		return err;
 
-	/*
+
 	printk("ov %s mode->res_x %d mode->res_y %d mode_index %d\n",
 					__func__,
 					mode->res_x,
 					mode->res_y,
 					mode_index
 					);
-	*/
+
 
 	if (!mode->res_x && !mode->res_y) {
 		if (mode->frame_length || mode->coarse_time || mode->gain) {
@@ -2194,8 +2621,10 @@ static int ov16825_mode_wr(struct ov16825_info *info,
 	err = ov16825_mode_able(info, true);
 	if (err < 0)
 		goto ov16825_mode_wr_err;
-
-
+/*
+	if((mode->res_x == 2304) && (mode->res_y == 1728))
+		mdelay(50);
+*/
 	return 0;
 
 
@@ -2603,26 +3032,268 @@ static int ov16825_param_wr(struct ov16825_info *info, unsigned long arg)
 	}
 }
 
+static int ov16825_eeprom_release(
+	struct ov16825_info *info)
+{
+	int i;
+
+	for (i = 0; i < OV16825_EEPROM_COUNT; i++) {
+		if (info->eeprom[i].i2c_client != NULL) {
+			i2c_unregister_device(info->eeprom[i].i2c_client);
+			info->eeprom[i].i2c_client = NULL;
+		}
+	}
+
+	return 0;
+}
+
+static int ov16825_eeprom_init(
+	struct ov16825_info *info)
+{
+	const char *dev_name = "eeprom_GT24C16";
+	static struct regmap_config eeprom_regmap_config = {
+		.reg_bits = 8,
+		.val_bits = 8,
+	};
+	int i;
+	int err;
+
+	for (i = 0; i < OV16825_EEPROM_COUNT; i++) {
+		info->eeprom[i].adap = i2c_get_adapter(
+				info->i2c_client->adapter->nr);
+		memset(&info->eeprom[i].brd, 0, sizeof(info->eeprom[i].brd));
+		strncpy(info->eeprom[i].brd.type, dev_name,
+				sizeof(info->eeprom[i].brd.type));
+		info->eeprom[i].brd.addr = eeprom_dev_addr[i];
+		info->eeprom[i].i2c_client = i2c_new_device(
+				info->eeprom[i].adap, &info->eeprom[i].brd);
+
+		info->eeprom[i].regmap = devm_regmap_init_i2c(
+			info->eeprom[i].i2c_client, &eeprom_regmap_config);
+		if (IS_ERR(info->eeprom[i].regmap)) {
+			err = PTR_ERR(info->eeprom[i].regmap);
+			ov16825_eeprom_release(info);
+			return err;
+		}
+
+		info->eeprom[i].block_nr = 1 + i;
+		memset(info->eeprom[i].buf,
+			0,
+			OV16825_EEPROM_SIZE);
+		info->eeprom[i].size = OV16825_EEPROM_SIZE;
+	}
+
+	return 0;
+}
+
+static int ov16825_eeprom_rd_block_nr(
+	struct ov16825_info *info,
+	int block_nr)
+{
+	struct regmap *regmap = NULL;
+	int i = 0;
+	int reg = 0;
+	u8 *buf = NULL;
+	int length = 0;
+
+	for (i = 0; i < OV16825_EEPROM_COUNT; i++) {
+		if(info->eeprom[i].block_nr == block_nr) {
+			regmap = info->eeprom[i].regmap;
+			buf = info->eeprom[i].buf;
+			length = info->eeprom[i].size;
+		}
+	}
+
+	if (regmap == NULL)
+		return -EFAULT;
+
+	return regmap_raw_read(regmap,
+		reg,
+		buf,
+		length);
+}
+
+static int ov16825_eeprom_get_buf(
+	struct ov16825_info *info,
+	int block_nr,
+	u8 **ppbuf,
+	int *psize)
+{
+	int i = 0;
+
+	*ppbuf = NULL;
+	*psize = 0;
+
+	for (i = 0; i < OV16825_EEPROM_COUNT; i++) {
+		if(info->eeprom[i].block_nr == block_nr) {
+			*ppbuf = info->eeprom[i].buf;
+			*psize = info->eeprom[i].size;
+			return 0;
+		}
+	}
+	return -EFAULT;
+}
+
+static int ov16825_eeprom_rd_cal(
+	struct ov16825_info *info,
+	void *user_dest)
+{
+	int err = 0;
+	int i = 0;
+	u8 *buf = NULL;
+	int size = 0;
+	int user_pointer = 0;
+	const int block_nr_start = 2;
+	const int block_nr_end = 5;
+
+	for (i = block_nr_start; i <= block_nr_end; i++) {
+		err = ov16825_eeprom_rd_block_nr(
+			info,
+			i);
+		if (err) {
+			printk("%s read block err, nr %d err %x\n", __func__,
+				i,
+				err);
+			return err;
+		}
+	}
+
+	for (i = block_nr_start; i <= block_nr_end; i++) {
+		err = ov16825_eeprom_get_buf(
+			info,
+			i,
+			&buf,
+			&size);
+		if (err) {
+			printk("%s read block err, nr %d err %x\n", __func__,
+				i,
+				err);
+			return err;
+		}
+
+		if (copy_to_user(
+			(void __user *)(user_dest + user_pointer),
+			buf,
+			size)) {
+			dev_err(&info->i2c_client->dev,
+				"%s:Failed to copy status to user\n",
+				__func__);
+			return -EFAULT;
+		}
+		user_pointer += size;
+	}
+
+	printk("%s bytes copied to user %d\n", __func__,
+		user_pointer);
+
+	return err;
+}
+#if 0
+static int ov16825_eeprom_rd_fuseid(
+	struct ov16825_info *info,
+	int *plength,
+	u8 **ppbuf)
+{
+	int err = 0;
+	int i = 0;
+	u8 *buf = NULL;
+	int size = 0;
+	const int block_nr_fuseid = 1;
+	//struct ov16825_eeprom_block1 *eb1 = NULL;
+
+	*plength = 0;
+	*ppbuf = NULL;
+
+	err = ov16825_eeprom_rd_block_nr(
+		info,
+		block_nr_fuseid);
+	if (err) {
+		printk("%s read block err, nr %d err %x\n", __func__,
+			1,
+			err);
+		return err;
+	}
+
+	err = ov16825_eeprom_get_buf(
+		info,
+		block_nr_fuseid,
+		&buf,
+		&size);
+	if (err) {
+		printk("%s read block err, nr %d err %x\n", __func__,
+			i,
+			err);
+		return err;
+	}
+#if 0
+	eb1 = (struct ov16825_eeprom_block1 *)buf;
+	if (size < OV16825_EEPROM_BLOCK1_FUSEID_LEN ||
+		eb1->flag == OV16825_EEPROM_BLOCK1_FLAG_INVALID)
+		return -EFAULT;
+#endif
+
+	/* *plength = OV16825_EEPROM_BLOCK1_FUSEID_LEN; */
+	*plength = OV16825_EEPROM_SIZE;
+	*ppbuf = buf;
+
+	return err;
+}
+
+/* use eeprom */
 static int ov16825_get_fuse_id(struct ov16825_info *info)
 {
 	int ret;
+	int length = 0;
+	u8 *buf = NULL;
+	int i = 0;
+
 	if (info->fuse_id.size)
 		return 0;
 
-
-	/* this is not fully implemented */
-	ret = 32;
-
-	if (ret){
-		info->fuse_id.size = 4;
-		info->fuse_id.data[0] = ret >> 24;
-		info->fuse_id.data[1] = ret >> 16;
-		info->fuse_id.data[2] = ret >> 8;
-		info->fuse_id.data[3] = ret;
-		ret = 0;
+	ret = ov16825_eeprom_rd_fuseid(
+		info,
+		&length,
+		&buf);
+	if (ret) {
+		printk("%s error read fuseid %d\n", __func__, ret);
+		return ret;
 	}
+
+	info->fuse_id.size = length;
+	for (i = 0; i < length; i++) {
+		info->fuse_id.data[i] = buf[i];
+		printk("%s fuse id d[%d] = %02x\n", __func__, i, buf[i]);
+	}
+
 	return ret;
 }
+#else
+static int ov16825_get_fuse_id(struct ov16825_info *info)
+{
+	int ret;
+	int i = 0;
+	#define SIZE_FUSEID		9
+	u8 bytes[SIZE_FUSEID] = {0, };
+
+	if (info->fuse_id.size)
+		return 0;
+
+	ret = ov16825_NVM_read_bytes(info,
+		0x7080,
+		bytes,
+		SIZE_FUSEID);
+	if (ret)
+		return ret;
+
+	info->fuse_id.size = SIZE_FUSEID;
+	for (i = 0; i < info->fuse_id.size; i++) {
+		info->fuse_id.data[i] = bytes[i];
+		printk("%s fuse id d[%d] = %02x\n", __func__, i, bytes[i]);
+	}
+
+	return ret;
+}
+#endif
 
 static long ov16825_ioctl(struct file *file,
 			 unsigned int cmd,
@@ -2654,6 +3325,14 @@ static long ov16825_ioctl(struct file *file,
 			return -EFAULT;
 		}
 		return 0;
+	case NVC_IOCTL_GET_EEPROM_DATA:
+		err = ov16825_eeprom_rd_cal(
+			info,
+			(void *)arg);
+		if (err) {
+			pr_err("%s read eeprom data err %d\n", __func__, err);
+		}
+		return err;
 
 	case NVC_IOCTL_PARAM_WR:
 		err = ov16825_param_wr(info, arg);
@@ -2839,56 +3518,6 @@ static void ov16825_sdata_init(struct ov16825_info *info)
 		info->sdata.view_angle_v = info->pdata->lens_view_angle_v;
 }
 
-static int ov16825_sync_en(unsigned num, unsigned sync)
-{
-	struct ov16825_info *master = NULL;
-	struct ov16825_info *slave = NULL;
-	struct ov16825_info *pos = NULL;
-
-	rcu_read_lock();
-	list_for_each_entry_rcu(pos, &ov16825_info_list, list) {
-		if (pos->pdata->num == num) {
-			master = pos;
-			break;
-		}
-	}
-	pos = NULL;
-	list_for_each_entry_rcu(pos, &ov16825_info_list, list) {
-		if (pos->pdata->num == sync) {
-			slave = pos;
-			break;
-		}
-	}
-	rcu_read_unlock();
-	if (master != NULL)
-		master->s_info = NULL;
-	if (slave != NULL)
-		slave->s_info = NULL;
-	if (!sync)
-		return 0; /* no err if sync disabled */
-
-	if (num == sync)
-		return -EINVAL; /* err if sync instance is itself */
-
-	if ((master != NULL) && (slave != NULL)) {
-		master->s_info = slave;
-		slave->s_info = master;
-	}
-	return 0;
-}
-
-static int ov16825_sync_dis(struct ov16825_info *info)
-{
-	if (info->s_info != NULL) {
-		info->s_info->s_mode = 0;
-		info->s_info->s_info = NULL;
-		info->s_mode = 0;
-		info->s_info = NULL;
-		return 0;
-	}
-
-	return -EINVAL;
-}
 static int ov16825_mclk_enable(struct ov16825_info *info)
 {
 	int err;
@@ -2910,40 +3539,23 @@ static void ov16825_mclk_disable(struct ov16825_info *info)
 static int ov16825_open(struct inode *inode, struct file *file)
 {
 	struct ov16825_info *info = NULL;
-	struct ov16825_info *pos = NULL;
 	int err;
-
-	rcu_read_lock();
-	list_for_each_entry_rcu(pos, &ov16825_info_list, list) {
-		if (pos->miscdev.minor == iminor(inode)) {
-			info = pos;
-			break;
-		}
-	}
-	rcu_read_unlock();
-	if (!info)
-		return -ENODEV;
+	struct miscdevice   *miscdev = file->private_data;
+	info = container_of(miscdev, struct ov16825_info, miscdev);
 
 	err = ov16825_mclk_enable(info);
 	if (err)
 		return err;
 
-	err = ov16825_sync_en(info->pdata->num, info->pdata->sync);
-	if (err == -EINVAL)
-		dev_err(&info->i2c_client->dev,
-			"%s err: invalid num (%u) and sync (%u) instance\n",
-			__func__, info->pdata->num, info->pdata->sync);
-	if (atomic_xchg(&info->in_use, 1))
+	if (atomic_xchg(&info->in_use, 1)){
+		dev_err(&info->i2c_client->dev, "device is BUSY now %s\n", __func__);
 		return -EBUSY;
-
-	if (info->s_info != NULL) {
-		if (atomic_xchg(&info->s_info->in_use, 1))
-			return -EBUSY;
-		info->sdata.stereo_cap = 1;
 	}
-
 	file->private_data = info;
 	dev_dbg(&info->i2c_client->dev, "%s\n", __func__);
+
+	ov16825_edp_req(info, 0);
+
 	return 0;
 }
 
@@ -2952,13 +3564,13 @@ int ov16825_release(struct inode *inode, struct file *file)
 	struct ov16825_info *info = file->private_data;
 
 	dev_dbg(&info->i2c_client->dev, "%s\n", __func__);
+	ov16825_edp_lowest(info);
 	ov16825_mclk_disable(info);
 	ov16825_pm_wr_s(info, NVC_PWR_OFF);
 	file->private_data = NULL;
 	WARN_ON(!atomic_xchg(&info->in_use, 0));
 	if (info->s_info != NULL)
 		WARN_ON(!atomic_xchg(&info->s_info->in_use, 0));
-	ov16825_sync_dis(info);
 	return 0;
 }
 
@@ -2969,17 +3581,51 @@ static const struct file_operations ov16825_fileops = {
 	.release = ov16825_release,
 };
 
+static ssize_t ov16825_show_fuseid(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct ov16825_info *info = i2c_get_clientdata(client);
+	int len = 0;
+	unsigned char buf_fuse[16] = {0, };/* max size for nvc_fuseid.data */
+	int pos = 0;
+	int i = 0;
+
+	if (atomic_read(&info->in_use))
+		return sprintf(buf, "device opened, close it first\n");
+
+	ov16825_read_fuseid_test(info,
+		&len,
+		buf_fuse);
+
+	if (len) {
+		for (i = 0; i < len; i++) {
+			pos += sprintf(buf + pos, "%02x", buf_fuse[i]);
+		}
+		pos += sprintf(buf + pos, "\n");
+		return pos;
+	} else
+		return sprintf(buf, "Not implemented yet %p\n", info);
+}
+
+static DEVICE_ATTR(fuseid, S_IRUSR | S_IRGRP,
+					ov16825_show_fuseid, NULL);
+
+static struct attribute *ov16825_attributes[] = {
+	&dev_attr_fuseid.attr,
+	NULL
+};
+
+static const struct attribute_group ov16825_attr_group = {
+	.attrs = ov16825_attributes,
+};
+
 static void ov16825_del(struct ov16825_info *info)
 {
 	ov16825_pm_exit(info);
 	if ((info->s_mode == NVC_SYNC_SLAVE) ||
 					(info->s_mode == NVC_SYNC_STEREO))
 		ov16825_pm_exit(info->s_info);
-	ov16825_sync_dis(info);
-	spin_lock(&ov16825_spinlock);
-	list_del_rcu(&info->list);
-	spin_unlock(&ov16825_spinlock);
-	synchronize_rcu();
 }
 
 static int ov16825_remove(struct i2c_client *client)
@@ -2987,53 +3633,49 @@ static int ov16825_remove(struct i2c_client *client)
 	struct ov16825_info *info = i2c_get_clientdata(client);
 
 	dev_dbg(&info->i2c_client->dev, "%s\n", __func__);
+	if (info->edpc)
+		edp_unregister_client(info->edpc);
+	sysfs_remove_group(&info->i2c_client->dev.kobj, &ov16825_attr_group);
+	ov16825_eeprom_release(info);
 	misc_deregister(&info->miscdev);
 	ov16825_del(info);
 	return 0;
 }
 
-
-static void ov16825_NVM_test(struct ov16825_info *info)
+static void ov16825_read_fuseid_test(
+	struct ov16825_info *info,
+	int *len,
+	unsigned char *buf)
 {
 	int err = 0;
+	int i = 0;
+	void *p = NULL;
+	#define SIZE_FUSEID		9
+	u8 bytes[SIZE_FUSEID] = {0, };
+
+	if (len && buf)
+		*len = 0;
+
+	p = ov16825_NVM_read_byte;
 
 	err = ov16825_mclk_enable(info);
 	if (err == 0) {
-		u8 byte1 = 0;
-		u8 byte2 = 0;
-		u8 bytes[0x80] = {0, };
-		int i = 0;
-
 		ov16825_pm_dev_wr(info, NVC_PWR_COMM);
 
-		printk("nvidia %s test ov16825_NVM_read_byte \n", __func__);
-
-		err = ov16825_NVM_read_byte(info,
-			0x7000,
-			&byte1);
-		err = ov16825_NVM_read_byte(info,
-			0x7000,
-			&byte2);
-
-		if (err == 0) {
-			printk("nvidia %s 1st read from 0x7000 0x%x \n", __func__, byte1);
-			printk("nvidia %s 2nd read from 0x7000 0x%x \n", __func__, byte2);
-		}
-		else
-			printk("nvidia %s read from 0x7000 error %d\n", __func__, err);
-
-		printk("nvidia %s test ov16825_NVM_read_bytes \n", __func__);
 		err = ov16825_NVM_read_bytes(info,
 			0x7080,
 			bytes,
-			0x80);
+			SIZE_FUSEID);
 		if (err == 0) {
-			for (i = 0; i < 0x80; i += 2) {
-				printk("nvidia %04x: %02x %02x\n", 0x7080 + i, bytes[i], bytes[i + 1]);
-			}
+			if (len)
+				*len = SIZE_FUSEID;
+			for (i = 0; i < SIZE_FUSEID; i++)
+					if (buf) {
+						buf[i] = bytes[i];
+					}
+		} else {
+			printk("nvidia %s cannot read fuseid %x", __func__, err);
 		}
-		else
-			printk("nvidia %s error read bytes from 0x7080 %d\n", __func__, err);
 
 		ov16825_pm_dev_wr(info, NVC_PWR_OFF);
 
@@ -3043,14 +3685,6 @@ static void ov16825_NVM_test(struct ov16825_info *info)
 
 
 static struct i2c_driver ov16825_i2c_driver;
-int fuseid_ov16825_value[9] = {0};
-static ssize_t imx179_fuseid_show(struct device_driver *ddri, char *buf)
-{
-	return sprintf(buf, "%.2x%.2x%.2x%.2x%.2x%.2x%.2x%.2x%.2x",
-		fuseid_ov16825_value[0], fuseid_ov16825_value[1], fuseid_ov16825_value[2], fuseid_ov16825_value[3], fuseid_ov16825_value[4],
-		fuseid_ov16825_value[5], fuseid_ov16825_value[6], fuseid_ov16825_value[7], fuseid_ov16825_value[8]);
-}
-static DRIVER_ATTR(fuseid, 0644, imx179_fuseid_show, NULL);
 static ssize_t ov16825_caminfo_show(struct device_driver *ddri, char *buf)
 {
 	return sprintf(buf, "%s","ov16825");
@@ -3064,7 +3698,7 @@ static int ov16825_probe(
 	struct ov16825_info *info;
 	char dname[16];
 	unsigned long clock_probe_rate;
-	int err, i;
+	int err;
 
 
 	dev_dbg(&client->dev, "%s\n", __func__);
@@ -3087,10 +3721,6 @@ static int ov16825_probe(
 	else
 		info->cap = &ov16825_dflt_cap;
 	i2c_set_clientdata(client, info);
-	INIT_LIST_HEAD(&info->list);
-	spin_lock(&ov16825_spinlock);
-	list_add_rcu(&info->list, &ov16825_info_list);
-	spin_unlock(&ov16825_spinlock);
 	ov16825_pm_init(info);
 	ov16825_sdata_init(info);
 	if (info->pdata->cfg & (NVC_CFG_NODEV | NVC_CFG_BOOT_INIT)) {
@@ -3142,17 +3772,6 @@ static int ov16825_probe(
 		return -ENODEV;
 	}
 
-        ov16825_pm_dev_wr(info, NVC_PWR_COMM);
-	ov16825_get_fuse_id(info);
-	ov16825_pm_dev_wr(info, NVC_PWR_OFF);
-	for (i = 0; i < info->fuse_id.size; i++)
-            fuseid_ov16825_value[i] = info->fuse_id.data[i];
-	err = driver_create_file(&ov16825_i2c_driver.driver, &driver_attr_fuseid);
-	if (err) {
-                printk("failed to register fuse id attributes\n");
-                err = 0;
-	}
-
 
 	info->mclk = devm_clk_get(&client->dev, info->pdata->clk_name);
 	if (info->mclk == NULL) {
@@ -3161,7 +3780,7 @@ static int ov16825_probe(
 		return -ENODEV;
 	}
 
-
+#if 0
 	printk("nvidia %s ---> do init i2c device check \n", __func__);
 	err = ov16825_mclk_enable(info);
 	if (err == 0) {
@@ -3173,16 +3792,43 @@ static int ov16825_probe(
 			printk("nvidia %s cannot read device id \n", __func__);
 		ov16825_mclk_disable(info);
 	}
-
-        err = driver_create_file(&ov16825_i2c_driver.driver, &driver_attr_caminfo);
-	if (err) {
-                printk("failed to register caminfo attributes\n");
-                err = 0;
-	}
-        
 	printk("nvidia %s <--- do init i2c device check done \n", __func__);
+#endif
 
-	ov16825_NVM_test(info);
+	err = driver_create_file(&ov16825_i2c_driver.driver, &driver_attr_caminfo);
+	if (err) {
+		printk("failed to register caminfo attributes\n");
+		err = 0;
+	}
+	ov16825_read_fuseid_test(info, NULL, NULL);
+
+	err = ov16825_eeprom_init(info);
+	if (err)
+		printk("%s ov16825_eeprom_init failed\n", __func__);
+#if 0
+	{
+		int len = 0;
+		u8 *buf = NULL;
+		int i = 0;
+
+		ov16825_mclk_enable(info);
+		ov16825_pm_api_wr(info, NVC_PWR_ON);
+		ov16825_eeprom_rd_fuseid(
+			info,
+			&len,
+			&buf);
+		for (i = 0; i < len; i++)
+			printk("%s %d %02x\n", __func__, i, buf[i]);
+		ov16825_pm_api_wr(info, NVC_PWR_OFF);
+		ov16825_mclk_disable(info);
+	}
+#endif
+	err = sysfs_create_group(&client->dev.kobj,
+		&ov16825_attr_group);
+	if (err)
+		printk("%s cannot create sysfs node\n", __func__);
+
+	ov16825_edp_register(info);
 
 	return 0;
 }
